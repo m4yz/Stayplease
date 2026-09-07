@@ -562,14 +562,37 @@ with defects_tab:
             defect_df["Location"].astype(str) == str(selected_location)
         ].copy()
 
-        issue_types = (
+        # Count ALL issues first so the room breakdown always reconciles
+        # with the total shown in Top 10 Problematic Rooms / Locations.
+        all_issue_types = (
             selected_location_df.dropna(subset=["Task"])
+            .assign(Task=lambda x: x["Task"].astype(str).str.strip())
             .groupby("Task")
             .size()
             .reset_index(name="Cases")
             .sort_values("Cases", ascending=False)
-            .head(10)
-            .sort_values("Cases", ascending=True)
+        )
+
+        total_location_cases = int(all_issue_types["Cases"].sum()) if not all_issue_types.empty else 0
+
+        # Keep the chart readable: Top 10 issue types + Other Issues.
+        top_issues = all_issue_types.head(10).copy()
+        other_cases = int(all_issue_types.iloc[10:]["Cases"].sum())
+
+        if other_cases > 0:
+            top_issues = pd.concat(
+                [
+                    top_issues,
+                    pd.DataFrame([{"Task": "Other Issues", "Cases": other_cases}])
+                ],
+                ignore_index=True
+            )
+
+        issue_types = top_issues.sort_values("Cases", ascending=True)
+
+        st.metric(
+            f"📊 Total Defect / Issue Cases — Location {selected_location}",
+            f"{total_location_cases:,}"
         )
 
         if issue_types.empty:
@@ -590,6 +613,11 @@ with defects_tab:
             )
             fig.update_yaxes(type="category")
             st.plotly_chart(fig, use_container_width=True)
+
+            st.caption(
+                f"Breakdown reconciliation: {total_location_cases:,} total cases "
+                f"shown in the selected location."
+            )
 
 
 # =========================================================
