@@ -200,6 +200,28 @@ def top_n_counts(data, group_col, n=10):
     )
 
 
+def add_count_hover(fig, label_col, count_col="Tasks", total=None, extra_cols=None):
+    """Apply a consistent, lightweight Plotly hover template to ranking charts."""
+    if extra_cols is None:
+        extra_cols = []
+
+    # The chart data already exists in the figure, so customdata only adds
+    # lightweight tooltip metadata and does not require additional queries.
+    custom_fields = [label_col, count_col] + extra_cols
+    customdata = []
+
+    for trace in fig.data:
+        # Plotly Express keeps source values in trace customdata when supplied.
+        # This helper is intentionally conservative and only sets the template.
+        trace.hovertemplate = (
+            f"<b>%{{y}}</b><br>"
+            f"{count_col}: %{{x}}"
+            "<extra></extra>"
+        )
+
+    return fig
+
+
 def top_n_chart(data, group_col, title, n=10):
     chart_data = top_n_counts(data, group_col, n)
 
@@ -210,13 +232,25 @@ def top_n_chart(data, group_col, title, n=10):
     # Reverse order for readable horizontal ranking
     plot_data = chart_data.sort_values("Tasks", ascending=True)
 
+    total_cases = int(chart_data["Tasks"].sum())
+    plot_data["Share %"] = (plot_data["Tasks"] / total_cases * 100).round(1) if total_cases else 0
+
     fig = px.bar(
         plot_data,
         x="Tasks",
         y=group_col,
         orientation="h",
         text="Tasks",
+        custom_data=[group_col, "Tasks", "Share %"],
         title=title
+    )
+    fig.update_traces(
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "Cases / Tasks: %{customdata[1]:,}<br>"
+            "Share of Top 10: %{customdata[2]:.1f}%"
+            "<extra></extra>"
+        )
     )
     fig.update_layout(
         showlegend=False,
@@ -392,6 +426,14 @@ with overview_tab:
             status_counts, names="Status", values="Tasks",
             hole=0.55, title="Task Status Distribution"
         )
+        fig.update_traces(
+            hovertemplate=(
+                "<b>%{label}</b><br>"
+                "Tasks: %{value:,}<br>"
+                "Share: %{percent:.1%}"
+                "<extra></extra>"
+            )
+        )
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
@@ -402,11 +444,15 @@ with overview_tab:
             .sort_values("Tasks", ascending=True)
         )
 
+        team_total = int(team_counts["Tasks"].sum())
+        team_counts["Share %"] = (team_counts["Tasks"] / team_total * 100).round(1) if team_total else 0
         fig = px.bar(
             team_counts, x="Tasks", y="Team",
             orientation="h", text="Tasks",
+            custom_data=["Team", "Tasks", "Share %"],
             title="Tasks by Team"
         )
+        fig.update_traces(hovertemplate="<b>%{customdata[0]}</b><br>Tasks: %{customdata[1]:,}<br>Share: %{customdata[2]:.1f}%<extra></extra>")
         fig.update_layout(yaxis_title="")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -440,10 +486,14 @@ with operations_tab:
         )
 
         if not req_dept.empty:
+            req_total = int(req_dept["Tasks"].sum())
+            req_dept["Share %"] = (req_dept["Tasks"] / req_total * 100).round(1) if req_total else 0
             fig = px.bar(
                 req_dept, x="Req Department", y="Tasks",
-                text="Tasks", title="Requests by Requesting Department"
+                text="Tasks", custom_data=["Req Department", "Tasks", "Share %"],
+                title="Requests by Requesting Department"
             )
+            fig.update_traces(hovertemplate="<b>%{customdata[0]}</b><br>Tasks: %{customdata[1]:,}<br>Share: %{customdata[2]:.1f}%<extra></extra>")
             st.plotly_chart(fig, use_container_width=True)
 
     with col4:
@@ -456,10 +506,14 @@ with operations_tab:
                 .reset_index(name="Tasks")
             )
 
+            hour_total = int(hourly["Tasks"].sum())
+            hourly["Share %"] = (hourly["Tasks"] / hour_total * 100).round(1) if hour_total else 0
             fig = px.bar(
                 hourly, x="Request Hour", y="Tasks",
+                custom_data=["Request Hour", "Tasks", "Share %"],
                 title="🕒 Peak Request Hour"
             )
+            fig.update_traces(hovertemplate="<b>Hour %{customdata[0]:02d}:00</b><br>Tasks: %{customdata[1]:,}<br>Share: %{customdata[2]:.1f}%<extra></extra>")
             fig.update_xaxes(dtick=1)
             st.plotly_chart(fig, use_container_width=True)
 
@@ -547,14 +601,18 @@ with defects_tab:
             if recurring_locations.empty:
                 st.info("No location data available for this defect.")
             else:
+                recurring_total = int(recurring_locations["Cases"].sum())
+                recurring_locations["Share %"] = (recurring_locations["Cases"] / recurring_total * 100).round(1) if recurring_total else 0
                 fig = px.bar(
                     recurring_locations,
                     x="Cases",
                     y="Location",
                     orientation="h",
                     text="Cases",
+                    custom_data=["Location", "Cases", "Share %"],
                     title=f"📍 Top Recurring Locations — {selected_defect}"
                 )
+                fig.update_traces(hovertemplate=f"<b>{selected_defect}</b><br>Location: %{{customdata[0]}}<br>Cases: %{{customdata[1]:,}}<br>Share of displayed locations: %{{customdata[2]:.1f}}%<extra></extra>")
                 fig.update_yaxes(type="category")
                 fig.update_layout(
                     showlegend=False,
@@ -584,13 +642,17 @@ with defects_tab:
                 )
                 trend_data = trend_data.sort_values("SortDate")
 
+                trend_total = int(trend_data["Cases"].sum())
+                trend_data["Share %"] = (trend_data["Cases"] / trend_total * 100).round(1) if trend_total else 0
                 fig = px.line(
                     trend_data,
                     x="Month",
                     y="Cases",
                     markers=True,
+                    custom_data=["Month", "Cases", "Share %"],
                     title=f"📈 Trend Over Time — {selected_defect}"
                 )
+                fig.update_traces(hovertemplate=f"<b>{selected_defect}</b><br>Month: %{{customdata[0]}}<br>Cases: %{{customdata[1]:,}}<br>Share of selected defect: %{{customdata[2]:.1f}}%<extra></extra>")
                 fig.update_layout(
                     xaxis_title="Month",
                     yaxis_title="Cases"
@@ -654,14 +716,17 @@ with defects_tab:
         if issue_types.empty:
             st.info("No defect/issue type data available for this location.")
         else:
+            issue_types["Share %"] = (issue_types["Cases"] / total_location_cases * 100).round(1) if total_location_cases else 0
             fig = px.bar(
                 issue_types,
                 x="Cases",
                 y="Task",
                 orientation="h",
                 text="Cases",
+                custom_data=["Task", "Cases", "Share %"],
                 title=f"🔧 Types of Defects / Issues — Location {selected_location}"
             )
+            fig.update_traces(hovertemplate=f"<b>%{{customdata[0]}}</b><br>Location: {selected_location}<br>Cases: %{{customdata[1]:,}}<br>Share of location total: %{{customdata[2]:.1f}}%<extra></extra>")
             fig.update_layout(
                 showlegend=False,
                 yaxis_title="",
