@@ -16,12 +16,12 @@ EXPECTED_COLUMNS = [
 ]
 
 
-def clean_team_name(sheet):
-    name = str(sheet).strip()
+def clean_team_name(sheet_name):
+    name = str(sheet_name).strip()
     if "_" in name:
         first, rest = name.split("_", 1)
         if first.isdigit():
-            return rest
+            return rest.strip()
     return name
 
 
@@ -38,18 +38,15 @@ def read_single_excel(uploaded_file):
             continue
 
         try:
-            # StayPlease report format: row 3 contains column headers
             raw = pd.read_excel(uploaded_file, sheet_name=sheet, header=2)
             raw = raw.dropna(how="all")
 
             if raw.empty:
                 continue
 
-            # Remove repeated headers and empty-looking rows
             first_col = raw.iloc[:, 0].astype(str).str.strip()
             raw = raw[first_col.ne("Location")]
 
-            # Map available columns safely
             raw = raw.iloc[:, :len(EXPECTED_COLUMNS)].copy()
             raw.columns = EXPECTED_COLUMNS[:len(raw.columns)]
 
@@ -85,7 +82,6 @@ def load_all_files(uploaded_files):
 
     df = pd.concat(frames, ignore_index=True)
 
-    # Text normalization
     text_cols = [
         "Location", "Task", "Req Department", "Requestor", "Department",
         "Assignee", "Status", "Priority", "Pause Reason", "Message",
@@ -93,9 +89,9 @@ def load_all_files(uploaded_files):
     ]
 
     for col in text_cols:
+        # Critical: Location must remain categorical text, never numeric axis data
         df[col] = df[col].astype("string").str.strip()
 
-    # Status normalization
     status_map = {
         "todo": "To Do",
         "to do": "To Do",
@@ -107,44 +103,27 @@ def load_all_files(uploaded_files):
         "completed": "Done"
     }
 
-    df["Status"] = (
-        df["Status"]
-        .astype("string")
-        .str.strip()
-        .str.lower()
-        .map(status_map)
-        .fillna(df["Status"])
-    )
+    normalized = df["Status"].astype("string").str.strip().str.lower()
+    df["Status"] = normalized.map(status_map).fillna(df["Status"])
 
-    # Date conversion
-    date_cols = ["To Do", "Doing", "Pause Time", "Resume Time", "Done"]
-    for col in date_cols:
+    for col in ["To Do", "Doing", "Pause Time", "Resume Time", "Done"]:
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
 
-    # Resolution time = Done - To Do
     df["Resolution Hours"] = (
         (df["Done"] - df["To Do"]).dt.total_seconds() / 3600
     )
-
-    # Remove invalid negative durations and extreme accidental values
     df.loc[df["Resolution Hours"] < 0, "Resolution Hours"] = pd.NA
 
-    # Reporting date
     df["Report Date"] = df["Done"].fillna(df["To Do"])
+    df["Request Hour"] = df["To Do"].dt.hour
+    df["Request Month"] = df["To Do"].dt.to_period("M").astype("string")
 
-    # Open task age
     now = pd.Timestamp.now()
-    df["Open Age Hours"] = (
-        (now - df["To Do"]).dt.total_seconds() / 3600
-    )
+    df["Open Age Hours"] = (now - df["To Do"]).dt.total_seconds() / 3600
     df.loc[df["Status"] == "Done", "Open Age Hours"] = pd.NA
     df.loc[df["Open Age Hours"] < 0, "Open Age Hours"] = pd.NA
-
-    # Hour and weekday analytics
-    df["Request Hour"] = df["To Do"].dt.hour
-    df["Request Day"] = df["To Do"].dt.day_name()
 
     return df
 
@@ -160,61 +139,52 @@ def format_duration(hours):
     return f"{hours / 24:.1f} days"
 
 
-def top_n_chart(data, group_col, title, n=10):
-    if data.empty or group_col not in data.columns:
-        st.info("No data available.")
-        return
-
-    # IMPORTANT: Location / Room numbers must always be treated as categories,
-    # not as a continuous numeric axis.
-    chart_source = data.dropna(subset=[group_col]).copy()
-    chart_source[group_col] = chart_source[group_col].astype(str).str.strip()
-    chart_source = chart_source[chart_source[group_col] != ""]
-
-    chart_data = (
-        chart_source.groupby(group_col)
+def top_n_counts(data, group_col, n=10):
+    return (
+        data.dropna(subset=[group_col])
+        .assign(**{group_col: lambda x: x[group_col].astype(str)})
+        .groupby(group_col)
         .size()
         .reset_index(name="Tasks")
         .sort_values("Tasks", ascending=False)
         .head(n)
-        .sort_values("Tasks", ascending=True)
     )
+
+
+def top_n_chart(data, group_col, title, n=10):
+    chart_data = top_n_counts(data, group_col, n)
 
     if chart_data.empty:
         st.info("No data available.")
         return
 
+    # Reverse order for readable horizontal ranking
+    plot_data = chart_data.sort_values("Tasks", ascending=True)
+
     fig = px.bar(
-        chart_data,
+        plot_data,
         x="Tasks",
         y=group_col,
         orientation="h",
         text="Tasks",
         title=title
     )
-
-    # Force categorical rendering. This fixes room numbers such as 8309,
-    # 8205, etc. being displayed as a numeric scale.
-    fig.update_yaxes(
-        type="category",
-        categoryorder="array",
-        categoryarray=chart_data[group_col].tolist()
+    fig.update_layout(
+        showlegend=False,
+        yaxis_title="",
+        xaxis_title="Tasks",
+        margin=dict(l=20, r=20, t=55, b=30)
     )
-    fig.update_layout(showlegend=False, yaxis_title="")
+    fig.update_yaxes(type="category")
     st.plotly_chart(fig, use_container_width=True)
 
 
 # =========================================================
-# HEADER
+# HEADER + UPLOAD
 # =========================================================
 
 st.title("🏨 StayPlease Operational Intelligence")
 st.caption("Task • Request • Defect • Resolution Performance Dashboard")
-
-
-# =========================================================
-# DATA UPLOAD + GLOBAL FILTERS
-# =========================================================
 
 with st.sidebar:
     st.header("📤 Data Upload")
@@ -238,36 +208,32 @@ if df.empty:
     st.stop()
 
 
+# =========================================================
+# GLOBAL FILTERS
+# =========================================================
+
 with st.sidebar:
     st.divider()
     st.header("🎛️ Global Filters")
 
     source_options = sorted(df["Source File"].dropna().unique().tolist())
     selected_sources = st.multiselect(
-        "📁 Source File",
-        source_options,
-        default=source_options
+        "📁 Source File", source_options, default=source_options
     )
 
     team_options = sorted(df["Team"].dropna().unique().tolist())
     selected_teams = st.multiselect(
-        "🏢 Team",
-        team_options,
-        default=team_options
+        "🏢 Team", team_options, default=team_options
     )
 
     status_options = sorted(df["Status"].dropna().unique().tolist())
     selected_statuses = st.multiselect(
-        "📌 Status",
-        status_options,
-        default=status_options
+        "📌 Status", status_options, default=status_options
     )
 
     priority_options = sorted(df["Priority"].dropna().unique().tolist())
     selected_priorities = st.multiselect(
-        "🔥 Priority",
-        priority_options,
-        default=priority_options
+        "🔥 Priority", priority_options, default=priority_options
     )
 
     valid_dates = df["Report Date"].dropna()
@@ -279,10 +245,6 @@ with st.sidebar:
             value=(valid_dates.min().date(), valid_dates.max().date())
         )
 
-
-# =========================================================
-# APPLY GLOBAL FILTERS
-# =========================================================
 
 filtered = df.copy()
 
@@ -315,7 +277,7 @@ if selected_dates and len(selected_dates) == 2:
 
 
 # =========================================================
-# MAIN NAVIGATION
+# TABS
 # =========================================================
 
 overview_tab, operations_tab, defects_tab, team_tab, explorer_tab = st.tabs([
@@ -328,37 +290,34 @@ overview_tab, operations_tab, defects_tab, team_tab, explorer_tab = st.tabs([
 
 
 # =========================================================
-# 1. EXECUTIVE OVERVIEW
+# EXECUTIVE OVERVIEW
 # =========================================================
 
 with overview_tab:
-
     total_tasks = len(filtered)
     completed = int((filtered["Status"] == "Done").sum())
     open_tasks = total_tasks - completed
+    completion_rate = completed / total_tasks * 100 if total_tasks else 0
+
     urgent_open = int(
         (
-            (filtered["Priority"].fillna("").str.contains("urgent", case=False))
+            filtered["Priority"].fillna("")
+            .str.contains("urgent", case=False, na=False)
             & (filtered["Status"] != "Done")
         ).sum()
     )
-
-    completion_rate = (completed / total_tasks * 100) if total_tasks else 0
 
     completed_data = filtered[
         (filtered["Status"] == "Done")
         & filtered["Resolution Hours"].notna()
     ]
 
-    avg_resolution = completed_data["Resolution Hours"].mean()
-
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-
     c1.metric("📋 Total Tasks", f"{total_tasks:,}")
     c2.metric("✅ Completed", f"{completed:,}")
     c3.metric("🔄 Open Tasks", f"{open_tasks:,}")
     c4.metric("🎯 Completion Rate", f"{completion_rate:.1f}%")
-    c5.metric("⏱️ Avg Resolution", format_duration(avg_resolution))
+    c5.metric("⏱️ Avg Resolution", format_duration(completed_data["Resolution Hours"].mean()))
     c6.metric("🚨 Urgent Open", f"{urgent_open:,}")
 
     st.divider()
@@ -367,21 +326,17 @@ with overview_tab:
 
     with col1:
         status_counts = (
-            filtered["Status"]
-            .fillna("Unknown")
+            filtered["Status"].fillna("Unknown")
             .value_counts()
             .reset_index()
         )
         status_counts.columns = ["Status", "Tasks"]
 
-        fig_status = px.pie(
-            status_counts,
-            names="Status",
-            values="Tasks",
-            hole=0.55,
-            title="Task Status Distribution"
+        fig = px.pie(
+            status_counts, names="Status", values="Tasks",
+            hole=0.55, title="Task Status Distribution"
         )
-        st.plotly_chart(fig_status, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
     with col2:
         team_counts = (
@@ -391,62 +346,29 @@ with overview_tab:
             .sort_values("Tasks", ascending=True)
         )
 
-        fig_team = px.bar(
-            team_counts,
-            x="Tasks",
-            y="Team",
-            orientation="h",
-            text="Tasks",
+        fig = px.bar(
+            team_counts, x="Tasks", y="Team",
+            orientation="h", text="Tasks",
             title="Tasks by Team"
         )
-        fig_team.update_layout(yaxis_title="")
-        st.plotly_chart(fig_team, use_container_width=True)
-
-    trend = filtered.dropna(subset=["Report Date"]).copy()
-
-    if not trend.empty:
-        trend["Date"] = trend["Report Date"].dt.date
-
-        daily = (
-            trend.groupby(["Date", "Status"])
-            .size()
-            .reset_index(name="Tasks")
-        )
-
-        fig_trend = px.bar(
-            daily,
-            x="Date",
-            y="Tasks",
-            color="Status",
-            barmode="stack",
-            title="Daily Task Activity"
-        )
-        st.plotly_chart(fig_trend, use_container_width=True)
+        fig.update_layout(yaxis_title="")
+        st.plotly_chart(fig, use_container_width=True)
 
 
 # =========================================================
-# 2. OPERATIONAL ANALYTICS
+# OPERATIONAL ANALYTICS
 # =========================================================
 
 with operations_tab:
-
     st.subheader("📊 Operational Analytics")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        top_n_chart(
-            filtered,
-            "Task",
-            "🏆 Top 10 Most Requested Tasks"
-        )
+        top_n_chart(filtered, "Task", "🏆 Top 10 Most Requested Tasks")
 
     with col2:
-        top_n_chart(
-            filtered,
-            "Location",
-            "📍 Top 10 Locations / Rooms by Task Volume"
-        )
+        top_n_chart(filtered, "Location", "📍 Top 10 Locations / Rooms by Task Volume")
 
     st.divider()
 
@@ -462,16 +384,11 @@ with operations_tab:
         )
 
         if not req_dept.empty:
-            fig_req = px.bar(
-                req_dept,
-                x="Req Department",
-                y="Tasks",
-                text="Tasks",
-                title="Requests by Requesting Department"
+            fig = px.bar(
+                req_dept, x="Req Department", y="Tasks",
+                text="Tasks", title="Requests by Requesting Department"
             )
-            st.plotly_chart(fig_req, use_container_width=True)
-        else:
-            st.info("No requesting department data available.")
+            st.plotly_chart(fig, use_container_width=True)
 
     with col4:
         hour_data = filtered.dropna(subset=["Request Hour"])
@@ -483,35 +400,31 @@ with operations_tab:
                 .reset_index(name="Tasks")
             )
 
-            fig_hour = px.bar(
-                hourly,
-                x="Request Hour",
-                y="Tasks",
+            fig = px.bar(
+                hourly, x="Request Hour", y="Tasks",
                 title="🕒 Peak Request Hour"
             )
-            fig_hour.update_xaxes(dtick=1)
-            st.plotly_chart(fig_hour, use_container_width=True)
-        else:
-            st.info("No request time data available.")
+            fig.update_xaxes(dtick=1)
+            st.plotly_chart(fig, use_container_width=True)
 
 
 # =========================================================
-# 3. DEFECT ANALYTICS
+# DEFECT ANALYTICS
 # =========================================================
 
 with defects_tab:
-
     st.subheader("🔧 Defect Analytics")
 
-    # Defect Analytics uses the Engineering TEAM only.
-    # The source selector was removed to avoid duplicate/confusing
-    # Engineering Team vs Engineering Department choices.
+    # Defects are automatically based on Engineering team
     defect_df = filtered[
         filtered["Team"]
         .fillna("")
-        .astype(str)
         .str.contains("engineering", case=False, na=False)
     ].copy()
+
+    if defect_df.empty:
+        st.warning("No Engineering team data is available with the current filters.")
+        st.stop()
 
     d1, d2, d3 = st.columns(3)
 
@@ -525,14 +438,13 @@ with defects_tab:
     d2.metric("✅ Resolved Defects", f"{defect_done:,}")
     d3.metric("⏱️ Avg Resolution", format_duration(defect_avg))
 
+    st.divider()
+
+    # ---------------- MAIN TOP 10 ----------------
     col1, col2 = st.columns(2)
 
     with col1:
-        top_n_chart(
-            defect_df,
-            "Task",
-            "🔧 Top 10 Defects"
-        )
+        top_n_chart(defect_df, "Task", "🔧 Top 10 Defects")
 
     with col2:
         top_n_chart(
@@ -543,185 +455,220 @@ with defects_tab:
 
     st.divider()
 
-    st.subheader("🐢 Top 10 Longest Resolution Tasks")
+    # =====================================================
+    # DEFECT-CENTRIC BREAKDOWN
+    # =====================================================
 
-    longest = (
-        defect_df[
-            (defect_df["Status"] == "Done")
-            & defect_df["Resolution Hours"].notna()
-        ]
-        .sort_values("Resolution Hours", ascending=False)
-        .head(10)
-    )
+    st.subheader("🔍 Defect Breakdown")
 
-    if longest.empty:
-        st.info("No completed defect tasks with valid resolution time.")
-    else:
-        longest_display = longest[
-            ["Location", "Task", "Assignee", "Priority",
-             "To Do", "Done", "Resolution Hours"]
+    top_defects = top_n_counts(defect_df, "Task", 10)["Task"].tolist()
+
+    if top_defects:
+        selected_defect = st.selectbox(
+            "Select a defect to analyze",
+            top_defects,
+            key="selected_defect"
+        )
+
+        selected_defect_df = defect_df[
+            defect_df["Task"].astype(str) == str(selected_defect)
         ].copy()
 
-        longest_display["Resolution Time"] = (
-            longest_display["Resolution Hours"].apply(format_duration)
+        b1, b2 = st.columns(2)
+
+        with b1:
+            recurring_locations = (
+                selected_defect_df.dropna(subset=["Location"])
+                .assign(Location=lambda x: x["Location"].astype(str))
+                .groupby("Location")
+                .size()
+                .reset_index(name="Cases")
+                .sort_values("Cases", ascending=False)
+                .head(10)
+                .sort_values("Cases", ascending=True)
+            )
+
+            if recurring_locations.empty:
+                st.info("No location data available for this defect.")
+            else:
+                fig = px.bar(
+                    recurring_locations,
+                    x="Cases",
+                    y="Location",
+                    orientation="h",
+                    text="Cases",
+                    title=f"📍 Top Recurring Locations — {selected_defect}"
+                )
+                fig.update_yaxes(type="category")
+                fig.update_layout(
+                    showlegend=False,
+                    yaxis_title="",
+                    xaxis_title="Cases"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+        with b2:
+            trend = selected_defect_df.dropna(subset=["To Do"]).copy()
+
+            if trend.empty:
+                st.info("No date/time data available for this defect.")
+            else:
+                trend["Month"] = trend["To Do"].dt.to_period("M").astype(str)
+
+                trend_data = (
+                    trend.groupby("Month")
+                    .size()
+                    .reset_index(name="Cases")
+                )
+
+                # Chronological sort using real timestamps
+                trend_data["SortDate"] = pd.to_datetime(
+                    trend_data["Month"] + "-01",
+                    errors="coerce"
+                )
+                trend_data = trend_data.sort_values("SortDate")
+
+                fig = px.line(
+                    trend_data,
+                    x="Month",
+                    y="Cases",
+                    markers=True,
+                    title=f"📈 Trend Over Time — {selected_defect}"
+                )
+                fig.update_layout(
+                    xaxis_title="Month",
+                    yaxis_title="Cases"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # =====================================================
+    # LOCATION-CENTRIC BREAKDOWN
+    # =====================================================
+
+    st.subheader("🏨 Problematic Room / Location Breakdown")
+
+    top_locations = top_n_counts(defect_df, "Location", 10)["Location"].astype(str).tolist()
+
+    if top_locations:
+        selected_location = st.selectbox(
+            "Select a problematic room / location",
+            top_locations,
+            key="selected_problem_location"
         )
 
-        st.dataframe(
-            longest_display.drop(columns=["Resolution Hours"]),
-            use_container_width=True,
-            hide_index=True
+        selected_location_df = defect_df[
+            defect_df["Location"].astype(str) == str(selected_location)
+        ].copy()
+
+        issue_types = (
+            selected_location_df.dropna(subset=["Task"])
+            .groupby("Task")
+            .size()
+            .reset_index(name="Cases")
+            .sort_values("Cases", ascending=False)
+            .head(10)
+            .sort_values("Cases", ascending=True)
         )
+
+        if issue_types.empty:
+            st.info("No defect/issue type data available for this location.")
+        else:
+            fig = px.bar(
+                issue_types,
+                x="Cases",
+                y="Task",
+                orientation="h",
+                text="Cases",
+                title=f"🔧 Types of Defects / Issues — Location {selected_location}"
+            )
+            fig.update_layout(
+                showlegend=False,
+                yaxis_title="",
+                xaxis_title="Cases"
+            )
+            fig.update_yaxes(type="category")
+            st.plotly_chart(fig, use_container_width=True)
 
 
 # =========================================================
-# 4. TEAM PERFORMANCE
+# TEAM PERFORMANCE
 # =========================================================
 
 with team_tab:
-
     st.subheader("👥 Team Performance")
 
-    if filtered.empty:
-        st.info("No data available.")
-    else:
-        team_summary = (
-            filtered.groupby("Team")
-            .agg(
-                Total_Tasks=("Task", "size"),
-                Completed=("Status", lambda x: (x == "Done").sum()),
-                To_Do=("Status", lambda x: (x == "To Do").sum()),
-                Doing=("Status", lambda x: (x == "Doing").sum()),
-                Paused=("Status", lambda x: (x == "Paused").sum()),
-                Avg_Resolution_Hours=("Resolution Hours", "mean")
-            )
-            .reset_index()
+    team_summary = (
+        filtered.groupby("Team")
+        .agg(
+            Total_Tasks=("Task", "size"),
+            Completed=("Status", lambda x: (x == "Done").sum()),
+            To_Do=("Status", lambda x: (x == "To Do").sum()),
+            Doing=("Status", lambda x: (x == "Doing").sum()),
+            Paused=("Status", lambda x: (x == "Paused").sum()),
+            Avg_Resolution_Hours=("Resolution Hours", "mean")
         )
+        .reset_index()
+    )
 
-        team_summary["Completion Rate %"] = (
-            team_summary["Completed"]
-            / team_summary["Total_Tasks"]
-            * 100
-        ).round(1)
+    team_summary["Completion Rate %"] = (
+        team_summary["Completed"] / team_summary["Total_Tasks"] * 100
+    ).round(1)
 
-        team_summary["Avg Resolution"] = (
-            team_summary["Avg_Resolution_Hours"].apply(format_duration)
-        )
+    team_summary["Avg Resolution"] = (
+        team_summary["Avg_Resolution_Hours"].apply(format_duration)
+    )
 
-        st.dataframe(
-            team_summary[
-                ["Team", "Total_Tasks", "Completed", "To_Do", "Doing",
-                 "Paused", "Completion Rate %", "Avg Resolution"]
-            ],
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.divider()
-
-        assignee_summary = (
-            filtered.dropna(subset=["Assignee"])
-            .groupby(["Team", "Assignee"])
-            .agg(
-                Tasks=("Task", "size"),
-                Completed=("Status", lambda x: (x == "Done").sum()),
-                Avg_Resolution_Hours=("Resolution Hours", "mean")
-            )
-            .reset_index()
-            .sort_values("Tasks", ascending=False)
-        )
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            top_assignees = assignee_summary.head(15).sort_values("Tasks")
-
-            fig_assignee = px.bar(
-                top_assignees,
-                x="Tasks",
-                y="Assignee",
-                color="Team",
-                orientation="h",
-                title="Top Assignees by Workload"
-            )
-            st.plotly_chart(fig_assignee, use_container_width=True)
-
-        with col2:
-            assignee_completed = (
-                assignee_summary.sort_values(
-                    ["Completed", "Tasks"],
-                    ascending=False
-                )
-                .head(15)
-                .sort_values("Completed")
-            )
-
-            fig_completed = px.bar(
-                assignee_completed,
-                x="Completed",
-                y="Assignee",
-                color="Team",
-                orientation="h",
-                title="Top Assignees by Completed Tasks"
-            )
-            st.plotly_chart(fig_completed, use_container_width=True)
+    st.dataframe(
+        team_summary[
+            ["Team", "Total_Tasks", "Completed", "To_Do", "Doing",
+             "Paused", "Completion Rate %", "Avg Resolution"]
+        ],
+        use_container_width=True,
+        hide_index=True
+    )
 
 
 # =========================================================
-# 5. TASK EXPLORER
+# TASK EXPLORER
 # =========================================================
 
 with explorer_tab:
-
     st.subheader("📋 Task Explorer")
 
-    # Explorer starts from globally filtered data
     e1, e2, e3 = st.columns(3)
 
     with e1:
-        explorer_teams = sorted(filtered["Team"].dropna().unique().tolist())
+        options = sorted(filtered["Team"].dropna().unique().tolist())
         selected_explorer_teams = st.multiselect(
-            "🏢 Team",
-            explorer_teams,
-            default=explorer_teams,
-            key="explorer_team"
+            "🏢 Team", options, default=options, key="explorer_team"
         )
 
     with e2:
-        explorer_locations = sorted(filtered["Location"].dropna().unique().tolist())
+        options = sorted(filtered["Location"].dropna().astype(str).unique().tolist())
         selected_locations = st.multiselect(
-            "📍 Location",
-            explorer_locations,
-            default=explorer_locations,
-            key="explorer_location"
+            "📍 Location", options, default=options, key="explorer_location"
         )
 
     with e3:
-        explorer_assignees = sorted(filtered["Assignee"].dropna().unique().tolist())
+        options = sorted(filtered["Assignee"].dropna().unique().tolist())
         selected_assignees = st.multiselect(
-            "👤 Assignee",
-            explorer_assignees,
-            default=explorer_assignees,
-            key="explorer_assignee"
+            "👤 Assignee", options, default=options, key="explorer_assignee"
         )
 
     e4, e5, e6 = st.columns(3)
 
     with e4:
-        explorer_statuses = sorted(filtered["Status"].dropna().unique().tolist())
+        options = sorted(filtered["Status"].dropna().unique().tolist())
         selected_explorer_statuses = st.multiselect(
-            "📌 Status",
-            explorer_statuses,
-            default=explorer_statuses,
-            key="explorer_status"
+            "📌 Status", options, default=options, key="explorer_status"
         )
 
     with e5:
-        explorer_priorities = sorted(filtered["Priority"].dropna().unique().tolist())
+        options = sorted(filtered["Priority"].dropna().unique().tolist())
         selected_explorer_priorities = st.multiselect(
-            "🔥 Priority",
-            explorer_priorities,
-            default=explorer_priorities,
-            key="explorer_priority"
+            "🔥 Priority", options, default=options, key="explorer_priority"
         )
 
     with e6:
@@ -737,7 +684,7 @@ with explorer_tab:
         display = display[display["Team"].isin(selected_explorer_teams)]
 
     if selected_locations:
-        display = display[display["Location"].isin(selected_locations)]
+        display = display[display["Location"].astype(str).isin(selected_locations)]
 
     if selected_assignees:
         display = display[display["Assignee"].isin(selected_assignees)]
@@ -761,9 +708,7 @@ with explorer_tab:
 
         for col in search_columns:
             mask |= (
-                display[col]
-                .fillna("")
-                .astype(str)
+                display[col].fillna("").astype(str)
                 .str.contains(search, case=False, na=False)
             )
 
@@ -801,10 +746,6 @@ with explorer_tab:
         mime="text/csv"
     )
 
-
-# =========================================================
-# FOOTER
-# =========================================================
 
 st.divider()
 st.caption(
