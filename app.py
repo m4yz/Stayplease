@@ -165,9 +165,14 @@ def top_n_chart(data, group_col, title, n=10):
         st.info("No data available.")
         return
 
+    # IMPORTANT: Location / Room numbers must always be treated as categories,
+    # not as a continuous numeric axis.
+    chart_source = data.dropna(subset=[group_col]).copy()
+    chart_source[group_col] = chart_source[group_col].astype(str).str.strip()
+    chart_source = chart_source[chart_source[group_col] != ""]
+
     chart_data = (
-        data.dropna(subset=[group_col])
-        .groupby(group_col)
+        chart_source.groupby(group_col)
         .size()
         .reset_index(name="Tasks")
         .sort_values("Tasks", ascending=False)
@@ -186,6 +191,14 @@ def top_n_chart(data, group_col, title, n=10):
         orientation="h",
         text="Tasks",
         title=title
+    )
+
+    # Force categorical rendering. This fixes room numbers such as 8309,
+    # 8205, etc. being displayed as a numeric scale.
+    fig.update_yaxes(
+        type="category",
+        categoryorder="array",
+        categoryarray=chart_data[group_col].tolist()
     )
     fig.update_layout(showlegend=False, yaxis_title="")
     st.plotly_chart(fig, use_container_width=True)
@@ -490,30 +503,15 @@ with defects_tab:
 
     st.subheader("🔧 Defect Analytics")
 
-    # User-selectable definition instead of hardcoding assumptions
-    defect_mode = st.radio(
-        "Defect data source",
-        ["Engineering Team", "Engineering Department", "All Tasks"],
-        horizontal=True,
-        help="Choose how defects should be identified from your current Excel structure."
-    )
-
-    if defect_mode == "Engineering Team":
-        defect_df = filtered[
-            filtered["Team"]
-            .fillna("")
-            .str.contains("engineering", case=False, na=False)
-        ].copy()
-
-    elif defect_mode == "Engineering Department":
-        defect_df = filtered[
-            filtered["Department"]
-            .fillna("")
-            .str.contains("engineering", case=False, na=False)
-        ].copy()
-
-    else:
-        defect_df = filtered.copy()
+    # Defect Analytics uses the Engineering TEAM only.
+    # The source selector was removed to avoid duplicate/confusing
+    # Engineering Team vs Engineering Department choices.
+    defect_df = filtered[
+        filtered["Team"]
+        .fillna("")
+        .astype(str)
+        .str.contains("engineering", case=False, na=False)
+    ].copy()
 
     d1, d2, d3 = st.columns(3)
 
