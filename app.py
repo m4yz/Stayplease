@@ -1255,4 +1255,3 @@ st.caption(
     f"🏢 {filtered['Team'].nunique()} team(s)"
 
 )
-```
