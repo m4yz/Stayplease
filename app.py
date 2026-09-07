@@ -1,6 +1,19 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import matplotlib.pyplot as plt
+from io import BytesIO
+from datetime import datetime
+
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    PageBreak, Image, KeepTogether
+)
 
 st.set_page_config(
     page_title="StayPlease Operational Intelligence",
@@ -263,6 +276,269 @@ def top_n_chart(data, group_col, title, n=10):
 
 
 # =========================================================
+# PDF ANALYTIC REPORT
+# =========================================================
+
+def _pdf_chart_bar(data, label_col, value_col, title, xlabel, top_n=10):
+    """Create a lightweight horizontal bar chart as an in-memory PNG."""
+    if data is None or data.empty:
+        return None
+
+    chart = data.head(top_n).copy().sort_values(value_col, ascending=True)
+    fig, ax = plt.subplots(figsize=(8.2, 4.6))
+    ax.barh(chart[label_col].astype(str), chart[value_col])
+    ax.set_title(title, loc="left", fontweight="bold")
+    ax.set_xlabel(xlabel)
+    ax.grid(axis="x", alpha=0.25)
+    for i, value in enumerate(chart[value_col]):
+        ax.text(value, i, f" {int(value):,}", va="center", fontsize=8)
+    fig.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _pdf_chart_line(data, x_col, y_col, title, ylabel):
+    if data is None or data.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(8.2, 4.2))
+    ax.plot(data[x_col].astype(str), data[y_col], marker="o")
+    ax.set_title(title, loc="left", fontweight="bold")
+    ax.set_ylabel(ylabel)
+    ax.grid(axis="y", alpha=0.25)
+    ax.tick_params(axis="x", rotation=35)
+    fig.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def build_pdf_report(data, filter_context):
+    """Build a management-ready PDF report from the currently filtered data."""
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=36,
+        bottomMargin=36,
+        title="StayPlease Operational Intelligence Report",
+        author="StayPlease Operational Intelligence"
+    )
+
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name="ReportTitle", parent=styles["Title"], fontSize=22,
+        leading=27, textColor=colors.HexColor("#1F3A5F"), spaceAfter=8
+    ))
+    styles.add(ParagraphStyle(
+        name="ReportSubtitle", parent=styles["Normal"], fontSize=10,
+        leading=14, textColor=colors.HexColor("#666666"), spaceAfter=12
+    ))
+    styles.add(ParagraphStyle(
+        name="SectionHeader", parent=styles["Heading2"], fontSize=15,
+        leading=19, textColor=colors.HexColor("#1F3A5F"), spaceBefore=8, spaceAfter=8
+    ))
+    styles.add(ParagraphStyle(
+        name="Insight", parent=styles["BodyText"], fontSize=10,
+        leading=14, leftIndent=10, spaceAfter=5
+    ))
+
+    story = []
+    generated = datetime.now().strftime("%d %b %Y %H:%M")
+    total = len(data)
+    completed = int((data["Status"] == "Done").sum())
+    open_tasks = total - completed
+    completion_rate = completed / total * 100 if total else 0
+    urgent_open = int((
+        data["Priority"].fillna("").str.contains("urgent", case=False, na=False)
+        & (data["Status"] != "Done")
+    ).sum())
+    avg_resolution = data.loc[
+        (data["Status"] == "Done") & data["Resolution Hours"].notna(),
+        "Resolution Hours"
+    ].mean()
+
+    # COVER + EXECUTIVE SUMMARY
+    story.append(Paragraph("StayPlease Operational Intelligence", styles["ReportTitle"]))
+    story.append(Paragraph("Operational Analytics Report", styles["Heading2"]))
+    story.append(Paragraph(
+        f"Generated: {generated}<br/>"
+        f"Scope: {filter_context}<br/>"
+        f"Tasks included: {total:,}",
+        styles["ReportSubtitle"]
+    ))
+    story.append(Spacer(1, 12))
+
+    kpi_data = [
+        ["Total Tasks", "Completed", "Open Tasks"],
+        [f"{total:,}", f"{completed:,}", f"{open_tasks:,}"],
+        ["Completion Rate", "Avg Resolution", "Urgent Open"],
+        [f"{completion_rate:.1f}%", format_duration(avg_resolution), f"{urgent_open:,}"],
+    ]
+    kpi_table = Table(kpi_data, colWidths=[2.35*inch]*3)
+    kpi_table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#DCE6F1")),
+        ("BACKGROUND", (0,2), (-1,2), colors.HexColor("#DCE6F1")),
+        ("TEXTCOLOR", (0,0), (-1,-1), colors.HexColor("#1F3A5F")),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTNAME", (0,2), (-1,2), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,-1), 10),
+        ("FONTSIZE", (0,1), (-1,1), 18),
+        ("FONTSIZE", (0,3), (-1,3), 18),
+        ("ALIGN", (0,0), (-1,-1), "CENTER"),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#B7C9DD")),
+        ("TOPPADDING", (0,0), (-1,-1), 9),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 9),
+    ]))
+    story.append(kpi_table)
+    story.append(Spacer(1, 18))
+
+    # KEY FINDINGS
+    story.append(Paragraph("Key Findings & Insights", styles["SectionHeader"]))
+    top_tasks = top_n_counts(data, "Task", 10)
+    top_locations = top_n_counts(data, "Location", 10)
+    team_counts = top_n_counts(data, "Team", 10)
+    insights = []
+    if not top_tasks.empty:
+        row = top_tasks.iloc[0]
+        insights.append(f"<b>Highest-volume request:</b> {row['Task']} recorded {int(row['Tasks']):,} task(s) within the selected scope.")
+    if not top_locations.empty:
+        row = top_locations.iloc[0]
+        insights.append(f"<b>Primary operational hotspot:</b> Location {row['Location']} recorded {int(row['Tasks']):,} task(s).")
+    if not team_counts.empty:
+        row = team_counts.iloc[0]
+        insights.append(f"<b>Highest task volume by team:</b> {row['Team']} handled {int(row['Tasks']):,} task(s).")
+    insights.append(f"<b>Completion performance:</b> {completion_rate:.1f}% of included tasks are completed, with {urgent_open:,} urgent task(s) still open.")
+    if pd.notna(avg_resolution):
+        insights.append(f"<b>Resolution performance:</b> Average completed-task resolution time is {format_duration(avg_resolution)}.")
+    for item in insights:
+        story.append(Paragraph("• " + item, styles["Insight"]))
+
+    story.append(PageBreak())
+
+    # OPERATIONAL ANALYTICS
+    story.append(Paragraph("Operational Analytics", styles["SectionHeader"]))
+    if not top_tasks.empty:
+        img = _pdf_chart_bar(top_tasks, "Task", "Tasks", "Top 10 Most Requested Tasks", "Tasks")
+        if img:
+            story.append(Image(img, width=7.0*inch, height=3.8*inch))
+    if not top_locations.empty:
+        img = _pdf_chart_bar(top_locations, "Location", "Tasks", "Top 10 Locations / Rooms by Task Volume", "Tasks")
+        if img:
+            story.append(Image(img, width=7.0*inch, height=3.8*inch))
+
+    req_dept = top_n_counts(data, "Req Department", 10)
+    if not req_dept.empty:
+        story.append(Paragraph("Requesting Department", styles["SectionHeader"]))
+        img = _pdf_chart_bar(req_dept, "Req Department", "Tasks", "Top Requesting Departments", "Tasks")
+        if img:
+            story.append(Image(img, width=7.0*inch, height=3.8*inch))
+
+    story.append(PageBreak())
+
+    # DEFECT ANALYTICS
+    story.append(Paragraph("Defect Analytics", styles["SectionHeader"]))
+    defect_data = data[data["Team"].fillna("").str.contains("engineering", case=False, na=False)].copy()
+    if defect_data.empty:
+        story.append(Paragraph("No Engineering / defect data is available for the selected scope.", styles["Normal"]))
+    else:
+        defect_total = len(defect_data)
+        defect_done = int((defect_data["Status"] == "Done").sum())
+        defect_avg = defect_data.loc[(defect_data["Status"] == "Done"), "Resolution Hours"].mean()
+        defect_kpi = Table([
+            ["Total Defect Tasks", "Resolved Defects", "Avg Resolution"],
+            [f"{defect_total:,}", f"{defect_done:,}", format_duration(defect_avg)]
+        ], colWidths=[2.35*inch]*3)
+        defect_kpi.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#FCE4D6")),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("ALIGN", (0,0), (-1,-1), "CENTER"),
+            ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#E7B99C")),
+            ("FONTSIZE", (0,1), (-1,1), 16),
+            ("TOPPADDING", (0,0), (-1,-1), 8),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 8),
+        ]))
+        story.append(defect_kpi)
+        story.append(Spacer(1, 14))
+
+        top_defects = top_n_counts(defect_data, "Task", 10)
+        problematic = top_n_counts(defect_data, "Location", 10)
+        if not top_defects.empty:
+            img = _pdf_chart_bar(top_defects, "Task", "Tasks", "Top 10 Defects", "Cases")
+            if img:
+                story.append(Image(img, width=7.0*inch, height=3.8*inch))
+        if not problematic.empty:
+            img = _pdf_chart_bar(problematic, "Location", "Tasks", "Top 10 Problematic Rooms / Locations", "Cases")
+            if img:
+                story.append(Image(img, width=7.0*inch, height=3.8*inch))
+
+        trend = defect_data.dropna(subset=["To Do"]).copy()
+        if not trend.empty:
+            trend["Month"] = trend["To Do"].dt.to_period("M").astype(str)
+            trend_data = trend.groupby("Month").size().reset_index(name="Cases")
+            trend_data["SortDate"] = pd.to_datetime(trend_data["Month"] + "-01", errors="coerce")
+            trend_data = trend_data.sort_values("SortDate")
+            story.append(Paragraph("Defect Trend Over Time", styles["SectionHeader"]))
+            img = _pdf_chart_line(trend_data, "Month", "Cases", "Defect Trend Over Time", "Cases")
+            if img:
+                story.append(Image(img, width=7.0*inch, height=3.6*inch))
+
+    story.append(PageBreak())
+
+    # TEAM PERFORMANCE
+    story.append(Paragraph("Team Performance", styles["SectionHeader"]))
+    team_summary = (
+        data.groupby("Team")
+        .agg(
+            Total_Tasks=("Task", "size"),
+            Completed=("Status", lambda x: (x == "Done").sum()),
+            Avg_Resolution_Hours=("Resolution Hours", "mean")
+        ).reset_index()
+    )
+    if not team_summary.empty:
+        team_summary["Completion Rate %"] = (team_summary["Completed"] / team_summary["Total_Tasks"] * 100).round(1)
+        team_summary = team_summary.sort_values("Total_Tasks", ascending=False)
+        table_rows = [["Team", "Tasks", "Completed", "Completion", "Avg Resolution"]]
+        for _, row in team_summary.iterrows():
+            table_rows.append([
+                str(row["Team"]), f"{int(row["Total_Tasks"]):,}", f"{int(row["Completed"]):,}",
+                f"{float(row["Completion Rate %"]):.1f}%", format_duration(row["Avg_Resolution_Hours"])
+            ])
+        t = Table(table_rows, repeatRows=1, colWidths=[1.7*inch, 0.9*inch, 1.0*inch, 1.1*inch, 1.5*inch])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1F4E78")),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#C9D5E3")),
+            ("ALIGN", (1,1), (-1,-1), "CENTER"),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F5F8FB")]),
+            ("TOPPADDING", (0,0), (-1,-1), 6),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ]))
+        story.append(t)
+
+    story.append(Spacer(1, 18))
+    story.append(Paragraph("Report Notes", styles["SectionHeader"]))
+    story.append(Paragraph(
+        "This report is generated from the current StayPlease dashboard filters. "
+        "Locations that could not be mapped to PRSJKT or PPJKT are excluded from the analysis.",
+        styles["Normal"]
+    ))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+# =========================================================
 # HEADER + UPLOAD
 # =========================================================
 
@@ -365,6 +641,39 @@ if selected_dates and len(selected_dates) == 2:
         filtered["Report Date"].isna()
         | ((filtered["Report Date"] >= start_date) & (filtered["Report Date"] < end_date))
     ]
+
+# =========================================================
+# EXPORT PDF ANALYTIC REPORT
+# =========================================================
+
+property_scope = ", ".join(selected_properties) if selected_properties else "No Property Selected"
+area_scope_text = ", ".join(selected_area_types) if selected_area_types else "No Area Selected"
+if selected_dates and len(selected_dates) == 2:
+    period_scope = f"{selected_dates[0]} to {selected_dates[1]}"
+else:
+    period_scope = "All available dates"
+
+filter_context = f"Property: {property_scope} | Area: {area_scope_text} | Period: {period_scope}"
+
+with st.sidebar:
+    st.divider()
+    st.header("📄 Analytic Report")
+    st.caption("Export a management-ready PDF based on the current active filters.")
+    if st.button("📄 Generate PDF Report", use_container_width=True):
+        with st.spinner("Generating analytic report..."):
+            st.session_state["stayplease_pdf_report"] = build_pdf_report(filtered, filter_context)
+            st.session_state["stayplease_pdf_name"] = (
+                f"stayplease_analytic_report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+            )
+
+    if st.session_state.get("stayplease_pdf_report"):
+        st.download_button(
+            "⬇️ Download PDF Report",
+            data=st.session_state["stayplease_pdf_report"],
+            file_name=st.session_state.get("stayplease_pdf_name", "stayplease_analytic_report.pdf"),
+            mime="application/pdf",
+            use_container_width=True
+        )
 
 # =========================================================
 # TABS
