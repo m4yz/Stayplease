@@ -125,7 +125,56 @@ def load_all_files(uploaded_files):
     df.loc[df["Status"] == "Done", "Open Age Hours"] = pd.NA
     df.loc[df["Open Age Hours"] < 0, "Open Age Hours"] = pd.NA
 
+    # Add Property / Area classification for all dashboard pages.
+    df = add_property_area_mapping(df)
+
     return df
+
+
+def classify_stayplease_location(location):
+    """Classify locations for Property and Area filtering."""
+    if pd.isna(location):
+        return pd.Series([pd.NA, "Unmapped", pd.NA])
+    loc = str(location).strip()
+    if not loc or loc.lower() in {"nan", "none", "<na>"}:
+        return pd.Series([pd.NA, "Unmapped", pd.NA])
+
+    import re
+    match = re.fullmatch(r"(\d{2})(\d{2})", loc)
+    if match:
+        floor = int(match.group(1))
+        if 73 <= floor <= 82:
+            return pd.Series(["PRSJKT", "Guest Rooms", f"Floor {floor}"])
+        if 83 <= floor <= 89:
+            return pd.Series(["PPJKT", "Guest Rooms", f"Floor {floor}"])
+
+    upper = loc.upper()
+    if upper.startswith("PR"):
+        if "RESIDENCE LOUNGE" in upper:
+            return pd.Series(["PRSJKT", "Public Areas", "Residence Lounge"])
+        if "LOBBY" in upper or "RECEPTION" in upper:
+            return pd.Series(["PRSJKT", "Public Areas", "Lobby"])
+        if "GYM" in upper or "CHANGING ROOM" in upper:
+            return pd.Series(["PRSJKT", "Public Areas", "Gym"])
+        if "POOL" in upper:
+            return pd.Series(["PRSJKT", "Public Areas", "Pool"])
+        return pd.Series(["PRSJKT", "Other Areas", "Other PRSJKT Area"])
+
+    if upper.startswith("PP"):
+        if "LOBBY" in upper or "RECEPTION" in upper:
+            return pd.Series(["PPJKT", "Public Areas", "Lobby"])
+        outlet_keywords = ["KEYAKI", "TEPANYAKI", "EDEN BAR", "RESTAURANT", "OUTLET", "LEVEL 90", "PDR"]
+        if any(keyword in upper for keyword in outlet_keywords):
+            return pd.Series(["PPJKT", "Public Areas", "Restaurant & Outlets"])
+        return pd.Series(["PPJKT", "Other Areas", "Other PPJKT Area"])
+
+    return pd.Series([pd.NA, "Unmapped", pd.NA])
+
+
+def add_property_area_mapping(df):
+    mapped = df["Location"].apply(classify_stayplease_location)
+    mapped.columns = ["Property", "Area Type", "Specific Area"]
+    return pd.concat([df, mapped], axis=1)
 
 
 def format_duration(hours):
@@ -212,69 +261,76 @@ if df.empty:
 # GLOBAL FILTERS
 # =========================================================
 
+# Intentionally skip locations that cannot be mapped to PRSJKT or PPJKT.
+dashboard_df = df[df["Area Type"] != "Unmapped"].copy()
+
 with st.sidebar:
+    st.divider()
+    st.header("🏨 Property & Area")
+
+    property_options = ["PRSJKT", "PPJKT"]
+    selected_properties = st.multiselect("🏨 Property", property_options, default=property_options)
+
+    area_type_options = ["Guest Rooms", "Public Areas", "Other Areas"]
+    selected_area_types = st.multiselect("📍 Area Type", area_type_options, default=area_type_options)
+
+    area_scope = dashboard_df.copy()
+    if selected_properties:
+        area_scope = area_scope[area_scope["Property"].isin(selected_properties)]
+    if selected_area_types:
+        area_scope = area_scope[area_scope["Area Type"].isin(selected_area_types)]
+
+    specific_area_options = sorted(area_scope["Specific Area"].dropna().astype(str).unique().tolist())
+    selected_specific_areas = st.multiselect(
+        "📌 Specific Area", specific_area_options, default=specific_area_options,
+        help="Public Areas include Lobby, Residence Lounge, Gym, Pool, and Restaurant & Outlets."
+    )
+
     st.divider()
     st.header("🎛️ Global Filters")
 
-    source_options = sorted(df["Source File"].dropna().unique().tolist())
-    selected_sources = st.multiselect(
-        "📁 Source File", source_options, default=source_options
-    )
+    source_options = sorted(dashboard_df["Source File"].dropna().unique().tolist())
+    selected_sources = st.multiselect("📁 Source File", source_options, default=source_options)
 
-    team_options = sorted(df["Team"].dropna().unique().tolist())
-    selected_teams = st.multiselect(
-        "🏢 Team", team_options, default=team_options
-    )
+    team_options = sorted(dashboard_df["Team"].dropna().unique().tolist())
+    selected_teams = st.multiselect("🏢 Team", team_options, default=team_options)
 
-    status_options = sorted(df["Status"].dropna().unique().tolist())
-    selected_statuses = st.multiselect(
-        "📌 Status", status_options, default=status_options
-    )
+    status_options = sorted(dashboard_df["Status"].dropna().unique().tolist())
+    selected_statuses = st.multiselect("📌 Status", status_options, default=status_options)
 
-    priority_options = sorted(df["Priority"].dropna().unique().tolist())
-    selected_priorities = st.multiselect(
-        "🔥 Priority", priority_options, default=priority_options
-    )
+    priority_options = sorted(dashboard_df["Priority"].dropna().unique().tolist())
+    selected_priorities = st.multiselect("🔥 Priority", priority_options, default=priority_options)
 
-    valid_dates = df["Report Date"].dropna()
+    valid_dates = dashboard_df["Report Date"].dropna()
     selected_dates = None
-
     if not valid_dates.empty:
         selected_dates = st.date_input(
             "📅 Report Date Range",
             value=(valid_dates.min().date(), valid_dates.max().date())
         )
 
-
-filtered = df.copy()
-
+filtered = dashboard_df.copy()
+if selected_properties:
+    filtered = filtered[filtered["Property"].isin(selected_properties)]
+if selected_area_types:
+    filtered = filtered[filtered["Area Type"].isin(selected_area_types)]
+if selected_specific_areas:
+    filtered = filtered[filtered["Specific Area"].astype(str).isin(selected_specific_areas)]
 if selected_sources:
     filtered = filtered[filtered["Source File"].isin(selected_sources)]
-
 if selected_teams:
     filtered = filtered[filtered["Team"].isin(selected_teams)]
-
 if selected_statuses:
     filtered = filtered[filtered["Status"].isin(selected_statuses)]
-
 if selected_priorities:
-    filtered = filtered[
-        filtered["Priority"].isna()
-        | filtered["Priority"].isin(selected_priorities)
-    ]
-
+    filtered = filtered[filtered["Priority"].isna() | filtered["Priority"].isin(selected_priorities)]
 if selected_dates and len(selected_dates) == 2:
     start_date = pd.Timestamp(selected_dates[0])
     end_date = pd.Timestamp(selected_dates[1]) + pd.Timedelta(days=1)
-
     filtered = filtered[
         filtered["Report Date"].isna()
-        | (
-            (filtered["Report Date"] >= start_date)
-            & (filtered["Report Date"] < end_date)
-        )
+        | ((filtered["Report Date"] >= start_date) & (filtered["Report Date"] < end_date))
     ]
-
 
 # =========================================================
 # TABS
@@ -743,6 +799,7 @@ with explorer_tab:
         display = display[mask]
 
     display_columns = [
+        "Property", "Area Type", "Specific Area",
         "Team", "Location", "Task", "Quantity",
         "Req Department", "Requestor", "Department",
         "Assignee", "Status", "Priority",
@@ -779,6 +836,7 @@ st.divider()
 st.caption(
     f"🏨 StayPlease Operational Intelligence | "
     f"📊 {len(filtered):,} filtered tasks | "
+    f"🏨 {', '.join(sorted(filtered['Property'].dropna().unique().tolist())) if not filtered.empty else '-'} | "
     f"🏢 {filtered['Team'].nunique()} team(s) | "
     f"📁 {filtered['Source File'].nunique()} source file(s)"
 )
