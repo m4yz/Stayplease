@@ -1,4 +1,6 @@
-streamlit>=1.39
-pandas>=2.2
-plotly>=5.24
-openpyxl>=3.1
+streamlit>=1.39.0
+pandas>=2.2.0
+plotly>=5.24.0
+openpyxl>=3.1.0
+matplotlib>=3.8.0
+reportlab>=4.2.0
