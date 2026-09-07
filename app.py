@@ -694,14 +694,31 @@ with defects_tab:
         total_location_cases = int(all_issue_types["Cases"].sum()) if not all_issue_types.empty else 0
 
         # Keep the chart readable: Top 10 issue types + Other Issues.
+        # For "Other Issues", keep the underlying issue list so users can see
+        # exactly what is grouped into the Other bucket when hovering the bar.
         top_issues = all_issue_types.head(10).copy()
-        other_cases = int(all_issue_types.iloc[10:]["Cases"].sum())
+        other_issue_types = all_issue_types.iloc[10:].copy()
+        other_cases = int(other_issue_types["Cases"].sum())
+
+        top_issues["Other Details"] = ""
 
         if other_cases > 0:
+            other_breakdown = "<br>".join(
+                [
+                    f"• {row.Task}: {int(row.Cases):,}"
+                    for row in other_issue_types.itertuples(index=False)
+                ]
+            )
             top_issues = pd.concat(
                 [
                     top_issues,
-                    pd.DataFrame([{"Task": "Other Issues", "Cases": other_cases}])
+                    pd.DataFrame([
+                        {
+                            "Task": "Other Issues",
+                            "Cases": other_cases,
+                            "Other Details": other_breakdown
+                        }
+                    ])
                 ],
                 ignore_index=True
             )
@@ -723,10 +740,18 @@ with defects_tab:
                 y="Task",
                 orientation="h",
                 text="Cases",
-                custom_data=["Task", "Cases", "Share %"],
+                custom_data=["Task", "Cases", "Share %", "Other Details"],
                 title=f"🔧 Types of Defects / Issues — Location {selected_location}"
             )
-            fig.update_traces(hovertemplate=f"<b>%{{customdata[0]}}</b><br>Location: {selected_location}<br>Cases: %{{customdata[1]:,}}<br>Share of location total: %{{customdata[2]:.1f}}%<extra></extra>")
+            fig.update_traces(
+                hovertemplate=(
+                    f"<b>%{{customdata[0]}}</b><br>"
+                    f"Location: {selected_location}<br>"
+                    f"Cases: %{{customdata[1]:,}}<br>"
+                    f"Share of location total: %{{customdata[2]:.1f}}%"
+                    f"%{{customdata[3]}}<extra></extra>"
+                )
+            )
             fig.update_layout(
                 showlegend=False,
                 yaxis_title="",
