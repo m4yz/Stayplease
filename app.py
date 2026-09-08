@@ -726,7 +726,7 @@ def build_pdf_report(data, filter_context, work_orders=None, incidents=None):
 col_logo, col_title = st.columns([1, 10])
 
 with col_logo:
-    st.image("assets/stayplease_logo.png", width=70)
+    st.image("stayplease_logo.png", width=70)
 
 with col_title:
     st.markdown(
