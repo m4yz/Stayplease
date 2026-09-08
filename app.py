@@ -723,10 +723,10 @@ def build_pdf_report(data, filter_context, work_orders=None, incidents=None):
 # HEADER + DATA UPLOAD
 # =========================================================
 
-col_logo, col_title = st.columns([1, 10])
+col_logo, col_title = st.columns([0.6, 10])
 
 with col_logo:
-    st.image("stayplease_logo.png", width=70)
+    st.image("stayplease_logo.png", width=58)
 
 with col_title:
     st.markdown(
