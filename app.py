@@ -723,21 +723,7 @@ def build_pdf_report(data, filter_context, work_orders=None, incidents=None):
 # HEADER + DATA UPLOAD
 # =========================================================
 
-col_logo, col_title = st.columns([0.08, 1], gap="small")
-
-with col_logo:
-    st.image("stayplease_logo.png", width=60)
-
-with col_title:
-    st.markdown(
-        """
-        <h1 style="margin-top: 8px; margin-bottom: 0;">
-            StayPlease Operational Intelligence
-        </h1>
-        """,
-        unsafe_allow_html=True
-    )
-
+st.title("🏨 StayPlease Operational Intelligence")
 st.caption("Task • Work Order • Incident • Operational Intelligence Dashboard")
 
 with st.sidebar:
@@ -1014,6 +1000,199 @@ with operations_tab:
 
 
 # =========================================================
+# ISSUE CATEGORY NORMALIZATION + ROOM HEATMAP HELPERS
+# =========================================================
+
+def normalize_issue_category(value):
+    """Group similar StayPlease issue wording into actionable main categories."""
+    text = str(value).strip().lower()
+    if not text or text in {"nan", "none"}:
+        return "Other / Unclassified"
+
+    category_rules = [
+        ("AC / Air Conditioning", [
+            "aircon", "air con", "air-conditioning", "air conditioning",
+            "ac ", " a/c", "a/c", "ac-", " ac"
+        ]),
+        ("Electrical & Lighting", [
+            "lamp", "light", "lighting", "switch", "socket", "electrical",
+            "power", "electric"
+        ]),
+        ("Plumbing & Bathroom", [
+            "toilet", "shower", "drain", "plumbing", "water leak", "leaking",
+            "faucet", "tap", "sink", "bathroom", "bidet"
+        ]),
+        ("TV & Entertainment", [
+            "tv", "television", "channel", "set top", "set-top"
+        ]),
+        ("Door, Lock & Access", [
+            "door", "lock", "key card", "keycard", "card reader", "peephole"
+        ]),
+        ("Internet & Technology", [
+            "wifi", "wi-fi", "internet", "network", "router"
+        ]),
+        ("Appliances", [
+            "washing machine", "washer", "dryer", "refrigerator", "fridge",
+            "microwave", "oven", "dishwasher"
+        ]),
+        ("Furniture & Fixtures", [
+            "bed", "mattress", "chair", "table", "sofa", "curtain", "blind",
+            "cabinet", "wardrobe", "furniture"
+        ]),
+        ("Housekeeping / Cleanliness", [
+            "clean", "dirty", "housekeeping", "stain", "dust", "odor", "smell"
+        ]),
+        ("Pest Control", [
+            "pest", "cockroach", "insect", "mosquito", "ant", "bug"
+        ]),
+        ("Safety & Security", [
+            "smoke detector", "fire", "alarm", "sprinkler", "safe"
+        ]),
+    ]
+
+    padded = f" {text} "
+    for category, keywords in category_rules:
+        for keyword in keywords:
+            if keyword in text:
+                return category
+
+    return "Other / Unclassified"
+
+
+def add_issue_categories(dataframe, source_column="Task"):
+    result = dataframe.copy()
+    if source_column in result.columns:
+        result["Issue Category"] = result[source_column].apply(normalize_issue_category)
+    else:
+        result["Issue Category"] = "Other / Unclassified"
+    return result
+
+
+def build_room_heatmap_data(dataframe, location_column="Location", category_column="Issue Category"):
+    """Build a Floor × Room heatmap using valid 4-digit guest room numbers."""
+    if dataframe.empty or location_column not in dataframe.columns:
+        return pd.DataFrame(), pd.DataFrame()
+
+    work = dataframe.copy()
+    work["_LocationText"] = work[location_column].astype(str).str.extract(r"(\d{4})", expand=False)
+    work = work.dropna(subset=["_LocationText"]).copy()
+
+    # Only use mapped guest-room locations. First two digits are the floor.
+    work["Floor"] = pd.to_numeric(work["_LocationText"].str[:2], errors="coerce")
+    work["Room"] = pd.to_numeric(work["_LocationText"].str[2:], errors="coerce")
+    work = work.dropna(subset=["Floor", "Room"]).copy()
+
+    work["Floor"] = work["Floor"].astype(int)
+    work["Room"] = work["Room"].astype(int)
+
+    # Respect the two-property guest room ranges.
+    work = work[
+        ((work["Floor"] >= 73) & (work["Floor"] <= 82)) |
+        ((work["Floor"] >= 83) & (work["Floor"] <= 89))
+    ].copy()
+
+    if work.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    counts = (
+        work.groupby(["Floor", "Room"])
+        .size()
+        .reset_index(name="Issues")
+    )
+
+    top_category = (
+        work.groupby(["Floor", "Room", category_column])
+        .size()
+        .reset_index(name="Category Cases")
+        .sort_values(["Floor", "Room", "Category Cases"], ascending=[True, True, False])
+        .drop_duplicates(["Floor", "Room"])
+        [[ "Floor", "Room", category_column ]]
+        .rename(columns={category_column: "Top Category"})
+    )
+
+    detail = counts.merge(top_category, on=["Floor", "Room"], how="left")
+    return work, detail
+
+
+def render_room_issue_heatmap(dataframe, title, key_prefix):
+    room_work, detail = build_room_heatmap_data(dataframe)
+    if detail.empty:
+        st.info("No valid guest-room data is available for the heatmap with the current filters.")
+        return
+
+    property_choice = st.radio(
+        "Property",
+        ["PRSJKT", "PPJKT"],
+        horizontal=True,
+        key=f"{key_prefix}_property"
+    )
+
+    floor_min, floor_max = (73, 82) if property_choice == "PRSJKT" else (83, 89)
+    detail = detail[(detail["Floor"] >= floor_min) & (detail["Floor"] <= floor_max)].copy()
+
+    if detail.empty:
+        st.info(f"No room issues found for {property_choice} with the current filters.")
+        return
+
+    # Build a complete grid so rooms with no issues are visible as green.
+    floors = list(range(floor_min, floor_max + 1))
+    room_numbers = sorted(detail["Room"].unique().tolist())
+
+    grid = (
+        detail.pivot(index="Floor", columns="Room", values="Issues")
+        .reindex(index=floors, columns=room_numbers, fill_value=0)
+        .fillna(0)
+    )
+
+    category_grid = (
+        detail.pivot(index="Floor", columns="Room", values="Top Category")
+        .reindex(index=floors, columns=room_numbers)
+        .fillna("No recorded issues")
+    )
+
+    custom = []
+    for floor in floors:
+        row = []
+        for room in room_numbers:
+            room_no = f"{floor}{room:02d}"
+            row.append([room_no, int(grid.loc[floor, room]), category_grid.loc[floor, room]])
+        custom.append(row)
+
+    fig = px.imshow(
+        grid,
+        labels=dict(x="Room", y="Floor", color="Issue Count"),
+        x=[f"{r:02d}" for r in room_numbers],
+        y=[str(f) for f in floors],
+        color_continuous_scale=[
+            [0.0, "#2E8B57"],
+            [0.35, "#F6E05E"],
+            [0.65, "#ED8936"],
+            [1.0, "#C53030"],
+        ],
+        aspect="auto",
+        title=title
+    )
+
+    fig.update_traces(
+        customdata=custom,
+        hovertemplate=(
+            "<b>Room %{customdata[0]}</b><br>"
+            "Total Issues: %{customdata[1]}<br>"
+            "Top Category: %{customdata[2]}"
+            "<extra></extra>"
+        )
+    )
+
+    fig.update_layout(
+        height=max(420, 80 + len(floors) * 45),
+        margin=dict(l=20, r=20, t=60, b=40),
+        coloraxis_colorbar=dict(title="Issues")
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("🟢 Low activity → 🟡 Moderate → 🟠 High → 🔴 Highest issue concentration. Hover over a room for details.")
+
+# =========================================================
 # DEFECT ANALYTICS
 # =========================================================
 
@@ -1032,13 +1211,24 @@ with defects_tab:
         w3.metric("⏸️ Paused", f"{wo_paused:,}")
         w4.metric("🎯 Completion Rate", f"{(wo_done/wo_total*100 if wo_total else 0):.1f}%")
 
+        # Normalize similar maintenance wording into common issue categories.
+        wo_category_source = "Work Order Title" if "Work Order Title" in filtered_work_orders.columns else "Location"
+        work_order_analysis = add_issue_categories(filtered_work_orders, wo_category_source)
+
         wc1, wc2 = st.columns(2)
         with wc1:
-            top_n_chart(filtered_work_orders.rename(columns={"Work Order Title":"Work Order Issue"}), "Work Order Issue", "🔧 Top 10 Work Order Issues")
+            top_n_chart(work_order_analysis, "Issue Category", "🔧 Top Work Order Categories")
         with wc2:
-            top_n_chart(filtered_work_orders, "Location", "📍 Top 10 Maintenance Hotspots")
+            top_n_chart(work_order_analysis, "Location", "📍 Top 10 Maintenance Hotspots")
 
-        st.subheader("🔁 Recurring Maintenance Locations")
+        st.subheader("🗺️ Maintenance Hotspot Heatmap")
+        render_room_issue_heatmap(
+            work_order_analysis,
+            "🟢🟡🔴 Room Maintenance Heatmap",
+            "maintenance_heatmap"
+        )
+
+        st.subheader("🏨 Maintenance Hotspot Breakdown")
         recurring = top_n_counts(filtered_work_orders, "Location", 15)
         if not recurring.empty:
             fig = px.bar(recurring.sort_values("Tasks"), x="Tasks", y="Location", orientation="h", text="Tasks", custom_data=["Location","Tasks"], title="Locations with Repeated Work Orders")
@@ -1068,6 +1258,10 @@ with defects_tab:
         st.warning("No Engineering team data is available with the current filters.")
         st.stop()
 
+    # Normalize similar wording (e.g. AC Not Cold / AC Not Working / AC Noise)
+    # into one analytical category before ranking and heatmap analysis.
+    defect_df = add_issue_categories(defect_df, "Task")
+
     d1, d2, d3 = st.columns(3)
 
     defect_total = len(defect_df)
@@ -1086,7 +1280,7 @@ with defects_tab:
     col1, col2 = st.columns(2)
 
     with col1:
-        top_n_chart(defect_df, "Task", "🔧 Top 10 Defects")
+        top_n_chart(defect_df, "Issue Category", "🔧 Top Defect Categories")
 
     with col2:
         top_n_chart(
@@ -1094,6 +1288,14 @@ with defects_tab:
             "Location",
             "🚨 Top 10 Problematic Rooms / Locations"
         )
+
+    st.subheader("🗺️ Defect Heatmap — Problematic Rooms")
+    st.caption("Visual hotspot map based on total Engineering defect issues per room. Similar issue wording is grouped into common categories.")
+    render_room_issue_heatmap(
+        defect_df,
+        "🟢🟡🔴 Room Defect Heatmap",
+        "defect_heatmap"
+    )
 
     st.divider()
 
@@ -1103,7 +1305,7 @@ with defects_tab:
 
     st.subheader("🔍 Defect Breakdown")
 
-    top_defects = top_n_counts(defect_df, "Task", 10)["Task"].tolist()
+    top_defects = top_n_counts(defect_df, "Issue Category", 10)["Issue Category"].tolist()
 
     if top_defects:
         selected_defect = st.selectbox(
@@ -1113,7 +1315,7 @@ with defects_tab:
         )
 
         selected_defect_df = defect_df[
-            defect_df["Task"].astype(str) == str(selected_defect)
+            defect_df["Issue Category"].astype(str) == str(selected_defect)
         ].copy()
 
         b1, b2 = st.columns(2)
@@ -1214,13 +1416,16 @@ with defects_tab:
 
         # Count ALL issues first so the room breakdown always reconciles
         # with the total shown in Top 10 Problematic Rooms / Locations.
+        # Use normalized categories so similar issues (for example all AC variants)
+        # are counted together and the room pattern is immediately actionable.
         all_issue_types = (
-            selected_location_df.dropna(subset=["Task"])
-            .assign(Task=lambda x: x["Task"].astype(str).str.strip())
-            .groupby("Task")
+            selected_location_df.dropna(subset=["Issue Category"])
+            .assign(**{"Issue Category": lambda x: x["Issue Category"].astype(str).str.strip()})
+            .groupby("Issue Category")
             .size()
             .reset_index(name="Cases")
             .sort_values("Cases", ascending=False)
+            .rename(columns={"Issue Category": "Task"})
         )
 
         total_location_cases = int(all_issue_types["Cases"].sum()) if not all_issue_types.empty else 0
