@@ -173,10 +173,15 @@ def classify_stayplease_location(location):
     match = re.fullmatch(r"(\d{2})(\d{2})", loc)
     if match:
         floor = int(match.group(1))
-        if 73 <= floor <= 82:
-            return pd.Series(["PRSJKT", "Guest Rooms", f"Floor {floor}"])
-        if 83 <= floor <= 89:
-            return pd.Series(["PPJKT", "Guest Rooms", f"Floor {floor}"])
+        valid_room_floors = {73, 75, 76, 77, 78, 79, 80, 81, 82, 83, 85, 86, 87, 88, 89}
+        invalid_room_numbers = {"8826", "8827", "8926", "8927"}
+
+        if loc in invalid_room_numbers:
+            return pd.Series([pd.NA, "Unmapped", pd.NA])
+
+        if floor in valid_room_floors:
+            property_name = "PRSJKT" if floor <= 82 else "PPJKT"
+            return pd.Series([property_name, "Guest Rooms", f"Floor {floor}"])
 
     upper = loc.upper()
     if upper.startswith("PR"):
@@ -872,10 +877,11 @@ with st.sidebar:
 # TABS
 # =========================================================
 
-overview_tab, operations_tab, defects_tab, incident_tab, insights_tab, team_tab, explorer_tab, incident_explorer_tab = st.tabs([
+overview_tab, operations_tab, defects_tab, room_intelligence_tab, incident_tab, insights_tab, team_tab, explorer_tab, incident_explorer_tab = st.tabs([
     "🏠 Executive Overview",
     "📊 Operational Analytics",
     "🔧 Defect & Work Orders",
+    "🔥 Room Intelligence",
     "🚨 Incident Analytics",
     "🔎 Cross-Source Insights",
     "👥 Team Performance",
@@ -1068,318 +1074,190 @@ def add_issue_categories(dataframe, source_column="Task"):
     return result
 
 
-def get_valid_room_inventory():
-    """
-    Master guest-room inventory used for all room-based analytics.
-
-    Rules confirmed for the two properties:
-    - PRSJKT: floors 73, 75-82 (floor 74 does not exist)
-    - PPJKT: floors 83, 85-89 (floor 84 does not exist)
-    - Rooms xx26 and xx27 are excluded on floors 88 and 89.
-    """
-    valid_floors = {
-        "PRSJKT": [73, 75, 76, 77, 78, 79, 80, 81, 82],
-        "PPJKT": [83, 85, 86, 87, 88, 89],
-    }
-
-    inventory = {}
-    for prop, floors in valid_floors.items():
-        for floor in floors:
-            rooms = list(range(1, 28))
-            if floor in [88, 89]:
-                rooms = [r for r in rooms if r not in [26, 27]]
-            inventory[floor] = rooms
-    return valid_floors, inventory
-
-
-def extract_valid_room_locations(dataframe, location_column="Location"):
-    """Extract only valid guest-room numbers using the master inventory."""
+def build_room_heatmap_data(dataframe, location_column="Location", category_column="Issue Category"):
+    """Build a Floor × Room heatmap using valid 4-digit guest room numbers."""
     if dataframe.empty or location_column not in dataframe.columns:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
-    _, inventory = get_valid_room_inventory()
     work = dataframe.copy()
-    work["_RoomNo"] = (
-        work[location_column]
-        .astype(str)
-        .str.extract(r"(?<!\d)(\d{4})(?!\d)", expand=False)
-    )
-    work = work.dropna(subset=["_RoomNo"]).copy()
-    work["Floor"] = pd.to_numeric(work["_RoomNo"].str[:2], errors="coerce")
-    work["Room"] = pd.to_numeric(work["_RoomNo"].str[2:], errors="coerce")
+    work["_LocationText"] = work[location_column].astype(str).str.extract(r"(\d{4})", expand=False)
+    work = work.dropna(subset=["_LocationText"]).copy()
+
+    # Only use mapped guest-room locations. First two digits are the floor.
+    work["Floor"] = pd.to_numeric(work["_LocationText"].str[:2], errors="coerce")
+    work["Room"] = pd.to_numeric(work["_LocationText"].str[2:], errors="coerce")
     work = work.dropna(subset=["Floor", "Room"]).copy()
+
     work["Floor"] = work["Floor"].astype(int)
     work["Room"] = work["Room"].astype(int)
 
-    work = work[
-        work.apply(
-            lambda r: r["Floor"] in inventory and r["Room"] in inventory[r["Floor"]],
-            axis=1
-        )
-    ].copy()
+    # Respect the actual two-property guest-room inventory.
+    # There is no Floor 74 or Floor 84.
+    valid_floors = {73, 75, 76, 77, 78, 79, 80, 81, 82, 83, 85, 86, 87, 88, 89}
+    work = work[work["Floor"].isin(valid_floors)].copy()
 
-    work["Room Number"] = work["Floor"].astype(str) + work["Room"].astype(str).str.zfill(2)
-    return work
-
-
-def build_room_heatmap_data(dataframe, location_column="Location", category_column="Issue Category"):
-    """Build valid room counts plus dominant category and category detail."""
-    work = extract_valid_room_locations(dataframe, location_column)
+    # Explicitly exclude room numbers that do not exist.
+    invalid_rooms = {"8826", "8827", "8926", "8927"}
+    work = work[~work["_LocationText"].isin(invalid_rooms)].copy()
 
     if work.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     counts = (
-        work.groupby(["Floor", "Room", "Room Number"])
+        work.groupby(["Floor", "Room"])
         .size()
         .reset_index(name="Issues")
     )
 
-    if category_column not in work.columns:
-        work[category_column] = "Other / Unclassified"
-
-    category_counts = (
-        work.groupby(["Floor", "Room", "Room Number", category_column])
-        .size()
-        .reset_index(name="Cases")
-        .sort_values(["Floor", "Room", "Cases", category_column],
-                     ascending=[True, True, False, True])
-    )
-
     top_category = (
-        category_counts
+        work.groupby(["Floor", "Room", category_column])
+        .size()
+        .reset_index(name="Category Cases")
+        .sort_values(["Floor", "Room", "Category Cases"], ascending=[True, True, False])
         .drop_duplicates(["Floor", "Room"])
-        [["Floor", "Room", category_column, "Cases"]]
-        .rename(columns={category_column: "Top Category", "Cases": "Top Category Cases"})
+        [[ "Floor", "Room", category_column ]]
+        .rename(columns={category_column: "Top Category"})
     )
 
     detail = counts.merge(top_category, on=["Floor", "Room"], how="left")
-    return work, detail, category_counts
+    return work, detail
 
 
 def render_room_issue_heatmap(dataframe, title, key_prefix):
-    """
-    Render a hotel-style room hotspot map.
-    Each valid room is a labelled tile, making the location immediately readable.
-    """
-    room_work, detail, category_counts = build_room_heatmap_data(dataframe)
-
+    room_work, detail = build_room_heatmap_data(dataframe)
     if detail.empty:
-        st.info("No valid guest-room data is available for the current filters.")
+        st.info("No valid guest-room data is available for the heatmap with the current filters.")
         return
 
-    valid_floors, inventory = get_valid_room_inventory()
-
     property_choice = st.radio(
-        "Select Property",
+        "Property",
         ["PRSJKT", "PPJKT"],
         horizontal=True,
         key=f"{key_prefix}_property"
     )
 
-    floors = valid_floors[property_choice]
-    property_detail = detail[detail["Floor"].isin(floors)].copy()
-    property_categories = category_counts[category_counts["Floor"].isin(floors)].copy()
+    property_floors = {
+        "PRSJKT": [73, 75, 76, 77, 78, 79, 80, 81, 82],
+        "PPJKT": [83, 85, 86, 87, 88, 89],
+    }
+    floors = property_floors[property_choice]
+    detail = detail[detail["Floor"].isin(floors)].copy()
 
-    # Summary metrics for the selected property.
-    affected_rooms = int(property_detail["Room Number"].nunique())
-    total_issues = int(property_detail["Issues"].sum())
-    max_issues = int(property_detail["Issues"].max()) if not property_detail.empty else 0
-    critical_rooms = int((property_detail["Issues"] >= max(5, property_detail["Issues"].quantile(0.85))).sum()) if not property_detail.empty else 0
+    if detail.empty:
+        st.info(f"No room issues found for {property_choice} with the current filters.")
+        return
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("🏨 Rooms with Issues", f"{affected_rooms:,}")
-    m2.metric("🔧 Total Issues", f"{total_issues:,}")
-    m3.metric("🔴 Highest Room Count", f"{max_issues:,}")
-    m4.metric("⚠️ High-Attention Rooms", f"{critical_rooms:,}")
+    # Show only actual room suffixes found in the valid property data.
+    room_numbers = sorted(detail["Room"].unique().tolist())
 
-    # Determine colour thresholds relative to the selected property's actual data.
-    max_value = max(max_issues, 1)
-    q50 = float(property_detail["Issues"].quantile(0.50)) if not property_detail.empty else 1
-    q75 = float(property_detail["Issues"].quantile(0.75)) if not property_detail.empty else 2
-    q90 = float(property_detail["Issues"].quantile(0.90)) if not property_detail.empty else 3
-
-    def severity_color(value):
-        if value <= 0:
-            return "#E8F5E9"   # no recorded issue
-        if value <= max(1, q50):
-            return "#8BC34A"
-        if value <= max(2, q75):
-            return "#FDD835"
-        if value <= max(3, q90):
-            return "#FB8C00"
-        return "#E53935"
-
-    lookup = property_detail.set_index(["Floor", "Room"]).to_dict("index")
-
-    st.markdown(f"### {title}")
-    st.caption(
-        "Each tile is a real room. Green = lower issue activity, Yellow/Orange = increasing attention, Red = highest hotspot concentration."
+    grid = (
+        detail.pivot(index="Floor", columns="Room", values="Issues")
+        .reindex(index=floors, columns=room_numbers, fill_value=0)
+        .fillna(0)
     )
 
-    # Build compact HTML tiles: much easier to scan than a spreadsheet-style heatmap.
-    html = """
-    <style>
-    .hotel-floor-wrap {margin-bottom: 18px;}
-    .hotel-floor-title {
-        font-size: 1.05rem; font-weight: 700; margin: 6px 0 8px 0;
-        padding-bottom: 4px; border-bottom: 1px solid #d9d9d9;
-    }
-    .hotel-room-grid {
-        display: grid;
-        grid-template-columns: repeat(9, minmax(68px, 1fr));
-        gap: 7px;
-    }
-    .hotel-room-tile {
-        border-radius: 9px; min-height: 58px; padding: 7px 5px;
-        text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.14);
-        border: 1px solid rgba(0,0,0,.08);
-    }
-    .hotel-room-number {font-weight: 700; font-size: .82rem; line-height: 1.05;}
-    .hotel-room-count {font-size: .72rem; margin-top: 4px; opacity: .9;}
-    @media (max-width: 900px) {
-        .hotel-room-grid {grid-template-columns: repeat(6, minmax(58px, 1fr));}
-    }
-    </style>
-    """
+    category_grid = (
+        detail.pivot(index="Floor", columns="Room", values="Top Category")
+        .reindex(index=floors, columns=room_numbers)
+        .fillna("No recorded issues")
+    )
 
-    for floor in sorted(floors, reverse=True):
-        html += f'<div class="hotel-floor-wrap"><div class="hotel-floor-title">Floor {floor}</div><div class="hotel-room-grid">'
-        for room in inventory[floor]:
-            item = lookup.get((floor, room))
-            issues = int(item["Issues"]) if item else 0
+    custom = []
+    for floor in floors:
+        row = []
+        for room in room_numbers:
             room_no = f"{floor}{room:02d}"
-            top_cat = item["Top Category"] if item else "No recorded issues"
-            bg = severity_color(issues)
-            text_color = "#ffffff" if bg in ["#E53935", "#FB8C00"] else "#1f2937"
+            row.append([room_no, int(grid.loc[floor, room]), category_grid.loc[floor, room]])
+        custom.append(row)
 
-            html += (
-                f'<div class="hotel-room-tile" style="background:{bg};color:{text_color};" '
-                f'title="Room {room_no} | Total Issues: {issues} | Top Category: {top_cat}">'
-                f'<div class="hotel-room-number">{room_no}</div>'
-                f'<div class="hotel-room-count">{issues} issue{"s" if issues != 1 else ""}</div>'
-                f'</div>'
-            )
-        html += "</div></div>"
+    fig = px.imshow(
+        grid,
+        labels=dict(x="Room", y="Floor", color="Issue Count"),
+        x=[f"{r:02d}" for r in room_numbers],
+        y=[str(f) for f in floors],
+        color_continuous_scale=[
+            [0.0, "#2E8B57"],
+            [0.35, "#F6E05E"],
+            [0.65, "#ED8936"],
+            [1.0, "#C53030"],
+        ],
+        aspect="auto",
+        title=title
+    )
 
-    st.markdown(html, unsafe_allow_html=True)
-
-    # Top room ranking + category breakdown below the visual map.
-    left, right = st.columns([1.15, 0.85])
-
-    with left:
-        st.markdown("#### 🔥 Top Problematic Rooms")
-        ranking = property_detail.sort_values(
-            ["Issues", "Room Number"], ascending=[False, True]
-        ).head(10).copy()
-
-        if not ranking.empty:
-            fig = px.bar(
-                ranking.sort_values("Issues"),
-                x="Issues",
-                y="Room Number",
-                orientation="h",
-                text="Issues",
-                custom_data=["Room Number", "Issues", "Top Category"],
-                color="Issues",
-                color_continuous_scale=[
-                    [0.0, "#8BC34A"],
-                    [0.50, "#FDD835"],
-                    [0.75, "#FB8C00"],
-                    [1.0, "#E53935"],
-                ],
-            )
-            fig.update_traces(
-                hovertemplate=(
-                    "<b>Room %{customdata[0]}</b><br>"
-                    "Total Issues: %{customdata[1]}<br>"
-                    "Top Category: %{customdata[2]}"
-                    "<extra></extra>"
-                )
-            )
-            fig.update_layout(
-                height=420,
-                margin=dict(l=20, r=20, t=25, b=20),
-                coloraxis_showscale=False,
-                xaxis_title="Issues",
-                yaxis_title=""
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-    with right:
-        st.markdown("#### 🧩 Top Problem Categories")
-        cat_summary = (
-            property_categories.groupby("Issue Category", as_index=False)["Cases"]
-            .sum()
-            .sort_values("Cases", ascending=False)
-            .head(8)
+    fig.update_traces(
+        customdata=custom,
+        hovertemplate=(
+            "<b>Room %{customdata[0]}</b><br>"
+            "Total Issues: %{customdata[1]}<br>"
+            "Top Category: %{customdata[2]}"
+            "<extra></extra>"
         )
+    )
 
-        if not cat_summary.empty:
-            fig = px.bar(
-                cat_summary.sort_values("Cases"),
-                x="Cases",
-                y="Issue Category",
-                orientation="h",
-                text="Cases",
-                custom_data=["Issue Category", "Cases"],
-            )
-            fig.update_traces(
-                hovertemplate="<b>%{customdata[0]}</b><br>Issues: %{customdata[1]}<extra></extra>"
-            )
-            fig.update_layout(
-                height=420,
-                margin=dict(l=20, r=20, t=25, b=20),
-                xaxis_title="Issues",
-                yaxis_title=""
-            )
-            st.plotly_chart(fig, use_container_width=True)
+    fig.update_layout(
+        height=max(420, 80 + len(floors) * 45),
+        margin=dict(l=20, r=20, t=60, b=40),
+        coloraxis_colorbar=dict(title="Issues")
+    )
 
-    # Detailed explorer: lets management understand why a specific room is hot.
-    st.markdown("#### 🔎 Room Issue Explorer")
-    room_options = property_detail.sort_values(["Floor", "Room"])["Room Number"].tolist()
-    if room_options:
-        selected_room = st.selectbox(
-            "Select a room for detailed issue breakdown",
-            room_options,
-            key=f"{key_prefix}_room_explorer"
-        )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("🟢 Low activity → 🟡 Moderate → 🟠 High → 🔴 Highest issue concentration. Hover over a room for details.")
 
-        selected = room_work[room_work["Room Number"] == selected_room].copy()
-        room_cat = (
-            selected.groupby("Issue Category")
-            .size()
-            .reset_index(name="Issues")
-            .sort_values("Issues", ascending=False)
-        )
 
-        ec1, ec2 = st.columns([0.8, 1.2])
-        with ec1:
-            total_room_issues = len(selected)
-            dominant = room_cat.iloc[0]["Issue Category"] if not room_cat.empty else "-"
-            st.metric("Total Issues", f"{total_room_issues:,}")
-            st.metric("Dominant Category", dominant)
+def render_top_problematic_rooms(dataframe, title="🔥 Top 10 Problematic Rooms"):
+    _, detail = build_room_heatmap_data(dataframe)
+    if detail.empty:
+        st.info("No valid guest-room data is available for the selected scope.")
+        return
 
-        with ec2:
-            if not room_cat.empty:
-                fig = px.bar(
-                    room_cat.sort_values("Issues"),
-                    x="Issues",
-                    y="Issue Category",
-                    orientation="h",
-                    text="Issues",
-                    custom_data=["Issue Category", "Issues"],
-                )
-                fig.update_traces(
-                    hovertemplate="<b>%{customdata[0]}</b><br>Issues: %{customdata[1]}<extra></extra>"
-                )
-                fig.update_layout(
-                    height=max(260, 70 + len(room_cat) * 45),
-                    margin=dict(l=20, r=20, t=20, b=20),
-                    xaxis_title="Issues",
-                    yaxis_title=""
-                )
-                st.plotly_chart(fig, use_container_width=True)
+    ranking = detail.copy()
+    ranking["Room"] = ranking.apply(
+        lambda row: f"{int(row['Floor'])}{int(row['Room']):02d}",
+        axis=1
+    )
+    ranking = (
+        ranking.sort_values(["Issues", "Room"], ascending=[False, True])
+        .head(10)
+        .sort_values(["Issues", "Room"], ascending=[True, True])
+    )
+
+    fig = px.bar(
+        ranking,
+        x="Issues",
+        y="Room",
+        orientation="h",
+        text="Issues",
+        color="Issues",
+        color_continuous_scale=[
+            [0.0, "#2E8B57"],
+            [0.35, "#F6E05E"],
+            [0.65, "#ED8936"],
+            [1.0, "#C53030"],
+        ],
+        custom_data=["Room", "Issues", "Top Category"],
+        title=title
+    )
+    fig.update_traces(
+        hovertemplate=(
+            "<b>Room %{customdata[0]}</b><br>"
+            "Total Issues: %{customdata[1]:,}<br>"
+            "Main Category: %{customdata[2]}"
+            "<extra></extra>"
+        ),
+        textposition="outside",
+        cliponaxis=False
+    )
+    fig.update_yaxes(type="category", title="")
+    fig.update_xaxes(title="Issues", rangemode="tozero", dtick=1)
+    fig.update_layout(
+        showlegend=False,
+        coloraxis_showscale=False,
+        margin=dict(l=20, r=45, t=55, b=35),
+        bargap=0.28
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
 
 # =========================================================
 # DEFECT ANALYTICS
@@ -1404,42 +1282,7 @@ with defects_tab:
         wo_category_source = "Work Order Title" if "Work Order Title" in filtered_work_orders.columns else "Location"
         work_order_analysis = add_issue_categories(filtered_work_orders, wo_category_source)
 
-        wc1, wc2 = st.columns(2)
-        with wc1:
-            top_n_chart(work_order_analysis, "Issue Category", "🔧 Top Work Order Categories")
-        with wc2:
-            valid_wo_rooms = extract_valid_room_locations(work_order_analysis)
-            if valid_wo_rooms.empty:
-                st.info("No valid guest-room locations are available for maintenance hotspot ranking.")
-            else:
-                wo_hotspots = (
-                    valid_wo_rooms.groupby("Room Number")
-                    .size()
-                    .reset_index(name="Issues")
-                    .sort_values(["Issues", "Room Number"], ascending=[False, True])
-                    .head(10)
-                )
-                fig = px.bar(
-                    wo_hotspots.sort_values("Issues"),
-                    x="Issues",
-                    y="Room Number",
-                    orientation="h",
-                    text="Issues",
-                    custom_data=["Room Number", "Issues"],
-                    title="📍 Top 10 Maintenance Hotspots"
-                )
-                fig.update_traces(
-                    hovertemplate="<b>Room %{customdata[0]}</b><br>Issues: %{customdata[1]}<extra></extra>"
-                )
-                fig.update_layout(yaxis_title="", xaxis_title="Issues")
-                st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("🗺️ Maintenance Hotspot Heatmap")
-        render_room_issue_heatmap(
-            work_order_analysis,
-            "🟢🟡🔴 Room Maintenance Heatmap",
-            "maintenance_heatmap"
-        )
+        top_n_chart(work_order_analysis, "Issue Category", "🔧 Top Work Order Categories")
 
         st.subheader("🏨 Maintenance Hotspot Breakdown")
         recurring = top_n_counts(filtered_work_orders, "Location", 15)
@@ -1490,45 +1333,7 @@ with defects_tab:
     st.divider()
 
     # ---------------- MAIN TOP 10 ----------------
-    col1, col2 = st.columns(2)
-
-    with col1:
-        top_n_chart(defect_df, "Issue Category", "🔧 Top Defect Categories")
-
-    with col2:
-        valid_defect_rooms = extract_valid_room_locations(defect_df)
-        if valid_defect_rooms.empty:
-            st.info("No valid guest-room locations are available for the current filters.")
-        else:
-            room_hotspots = (
-                valid_defect_rooms.groupby("Room Number")
-                .size()
-                .reset_index(name="Issues")
-                .sort_values(["Issues", "Room Number"], ascending=[False, True])
-                .head(10)
-            )
-            fig = px.bar(
-                room_hotspots.sort_values("Issues"),
-                x="Issues",
-                y="Room Number",
-                orientation="h",
-                text="Issues",
-                custom_data=["Room Number", "Issues"],
-                title="🚨 Top 10 Problematic Rooms"
-            )
-            fig.update_traces(
-                hovertemplate="<b>Room %{customdata[0]}</b><br>Issues: %{customdata[1]}<extra></extra>"
-            )
-            fig.update_layout(yaxis_title="", xaxis_title="Issues")
-            st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("🗺️ Defect Heatmap — Problematic Rooms")
-    st.caption("Visual hotspot map based on total Engineering defect issues per room. Similar issue wording is grouped into common categories.")
-    render_room_issue_heatmap(
-        defect_df,
-        "🟢🟡🔴 Room Defect Heatmap",
-        "defect_heatmap"
-    )
+    top_n_chart(defect_df, "Issue Category", "🔧 Top Defect Categories")
 
     st.divider()
 
@@ -1733,6 +1538,169 @@ with defects_tab:
             st.caption(
                 f"Breakdown reconciliation: {total_location_cases:,} total cases "
                 f"shown in the selected location."
+            )
+
+
+# =========================================================
+# ROOM INTELLIGENCE
+# =========================================================
+
+with room_intelligence_tab:
+    st.subheader("🔥 Room Intelligence")
+    st.caption(
+        "Dedicated guest-room hotspot analysis. Similar issue wording is grouped into common categories, "
+        "and only valid room numbers are included."
+    )
+
+    room_defects = filtered[
+        filtered["Team"]
+        .fillna("")
+        .str.contains("engineering", case=False, na=False)
+    ].copy()
+    room_defects = add_issue_categories(room_defects, "Task") if not room_defects.empty else pd.DataFrame()
+
+    if not filtered_work_orders.empty:
+        room_wo_source = (
+            "Work Order Title"
+            if "Work Order Title" in filtered_work_orders.columns
+            else "Location"
+        )
+        room_work_orders = add_issue_categories(
+            filtered_work_orders,
+            room_wo_source
+        )
+    else:
+        room_work_orders = pd.DataFrame()
+
+    available_sources = []
+    if not room_defects.empty:
+        available_sources.append("Engineering Defects")
+    if not room_work_orders.empty:
+        available_sources.append("Work Orders")
+    if not room_defects.empty and not room_work_orders.empty:
+        available_sources.append("Combined")
+
+    if not available_sources:
+        st.info(
+            "No Engineering defect or Work Order data is available for Room Intelligence "
+            "with the current global filters."
+        )
+    else:
+        source_choice = st.radio(
+            "Analysis Source",
+            available_sources,
+            horizontal=True,
+            key="room_intelligence_source"
+        )
+
+        if source_choice == "Engineering Defects":
+            room_analysis = room_defects.copy()
+        elif source_choice == "Work Orders":
+            room_analysis = room_work_orders.copy()
+        else:
+            defect_part = room_defects[["Location", "Issue Category"]].copy()
+            wo_part = room_work_orders[["Location", "Issue Category"]].copy()
+            room_analysis = pd.concat([defect_part, wo_part], ignore_index=True)
+
+        _, room_detail = build_room_heatmap_data(room_analysis)
+
+        if room_detail.empty:
+            st.info("No valid guest-room records are available for the selected analysis source.")
+        else:
+            top_room = (
+                room_detail.sort_values(["Issues", "Floor", "Room"], ascending=[False, True, True])
+                .iloc[0]
+            )
+            top_room_no = f"{int(top_room['Floor'])}{int(top_room['Room']):02d}"
+            total_room_issues = int(room_detail["Issues"].sum())
+            rooms_with_issues = int(len(room_detail))
+            main_category = str(top_room.get("Top Category", "Other / Unclassified"))
+
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("🏨 Rooms with Issues", f"{rooms_with_issues:,}")
+            r2.metric("🔥 Total Recorded Issues", f"{total_room_issues:,}")
+            r3.metric("🚨 Top Problematic Room", top_room_no)
+            r4.metric("🏷️ Main Issue Category", main_category)
+
+            st.divider()
+
+            left, right = st.columns([1.15, 1])
+            with left:
+                render_top_problematic_rooms(
+                    room_analysis,
+                    "🔥 Top 10 Problematic Rooms"
+                )
+
+            with right:
+                category_summary = (
+                    room_analysis
+                    .dropna(subset=["Issue Category"])
+                    .assign(**{
+                        "Issue Category": lambda x: x["Issue Category"].astype(str).str.strip()
+                    })
+                    .groupby("Issue Category")
+                    .size()
+                    .reset_index(name="Issues")
+                    .sort_values("Issues", ascending=True)
+                )
+
+                if not category_summary.empty:
+                    fig = px.bar(
+                        category_summary,
+                        x="Issues",
+                        y="Issue Category",
+                        orientation="h",
+                        text="Issues",
+                        custom_data=["Issue Category", "Issues"],
+                        title="🏷️ Problem Categories"
+                    )
+                    fig.update_traces(
+                        hovertemplate=(
+                            "<b>%{customdata[0]}</b><br>"
+                            "Issues: %{customdata[1]:,}"
+                            "<extra></extra>"
+                        ),
+                        textposition="outside",
+                        cliponaxis=False
+                    )
+                    fig.update_yaxes(type="category", title="")
+                    fig.update_xaxes(title="Issues", rangemode="tozero", dtick=1)
+                    fig.update_layout(
+                        showlegend=False,
+                        margin=dict(l=20, r=45, t=55, b=35),
+                        bargap=0.28
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+            st.divider()
+            st.subheader("🗺️ Room Maintenance Heatmap")
+            st.caption(
+                "Choose a property below. Green indicates low issue concentration, "
+                "progressing through yellow and orange to red for the highest concentration."
+            )
+            render_room_issue_heatmap(
+                room_analysis,
+                "🟢🟡🔴 Guest Room Issue Heatmap",
+                "room_intelligence_heatmap"
+            )
+
+            st.divider()
+            st.subheader("📋 Room Hotspot Detail")
+
+            room_detail_display = room_detail.copy()
+            room_detail_display["Room"] = room_detail_display.apply(
+                lambda row: f"{int(row['Floor'])}{int(row['Room']):02d}",
+                axis=1
+            )
+            room_detail_display = (
+                room_detail_display[["Room", "Issues", "Top Category"]]
+                .sort_values(["Issues", "Room"], ascending=[False, True])
+                .rename(columns={"Top Category": "Main Issue Category"})
+            )
+            st.dataframe(
+                room_detail_display,
+                use_container_width=True,
+                hide_index=True
             )
 
 
