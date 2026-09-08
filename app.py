@@ -643,8 +643,12 @@ def build_pdf_report(data, filter_context, work_orders=None, incidents=None):
 
     story.append(PageBreak())
 
-    # CROSS-SOURCE OPERATIONAL INTELLIGENCE
-    story.append(Paragraph("Operational Intelligence", styles["SectionHeader"]))
+    # CROSS-SOURCE OPERATIONAL INSIGHTS
+    story.append(Paragraph("Cross-Source Operational Insights", styles["SectionHeader"]))
+    story.append(Paragraph(
+        "This section compares maintenance and incident records at the same mapped location. It highlights operational overlap for review and does not establish causation.",
+        styles["Normal"]
+    ))
     if work_orders is None or work_orders.empty or incidents is None or incidents.empty:
         story.append(Paragraph("Work Order and Incident reports were not both available for this report scope.", styles["Normal"]))
     else:
@@ -867,14 +871,15 @@ with st.sidebar:
 # TABS
 # =========================================================
 
-overview_tab, operations_tab, defects_tab, incident_tab, intelligence_tab, team_tab, explorer_tab = st.tabs([
+overview_tab, operations_tab, defects_tab, incident_tab, insights_tab, team_tab, explorer_tab, incident_explorer_tab = st.tabs([
     "🏠 Executive Overview",
     "📊 Operational Analytics",
     "🔧 Defect & Work Orders",
     "🚨 Incident Analytics",
-    "🔥 Operational Intelligence",
+    "🔎 Cross-Source Insights",
     "👥 Team Performance",
-    "📋 Task Explorer"
+    "📋 Task Explorer",
+    "🚨 Incident Explorer"
 ])
 
 
@@ -1388,44 +1393,134 @@ with incident_tab:
             st.caption("No structured compensation type was recorded in the selected scope.")
 
 # =========================================================
-# OPERATIONAL INTELLIGENCE
+# CROSS-SOURCE INSIGHTS
 # =========================================================
 
-with intelligence_tab:
-    st.subheader("🔥 Operational Intelligence")
-    st.caption("Cross-source analysis identifies locations appearing in both Work Orders and Incident List Report during the selected scope. It indicates operational overlap, not proven causation.")
-    if filtered_work_orders.empty or filtered_incidents.empty:
-        st.info("Upload both Work Order Report and Incident List Report to enable cross-source operational intelligence.")
-    else:
-        wo_loc=filtered_work_orders.dropna(subset=["Location"]).copy()
-        wo_loc["Location"]=wo_loc["Location"].astype(str).str.strip()
-        inc_loc=filtered_incidents.dropna(subset=["Location"]).copy()
-        inc_loc["Location"]=inc_loc["Location"].astype(str).str.strip()
-        wo_counts=wo_loc.groupby("Location").size().reset_index(name="Work Orders")
-        inc_counts=inc_loc.groupby("Location").size().reset_index(name="Incidents")
-        open_counts=inc_loc[inc_loc["Status"].astype(str).str.lower().eq("open")].groupby("Location").size().reset_index(name="Open Incidents")
-        risk=wo_counts.merge(inc_counts,on="Location",how="inner").merge(open_counts,on="Location",how="left").fillna({"Open Incidents":0})
-        if risk.empty:
-            st.info("No mapped locations overlap between Work Orders and Incidents in the selected scope.")
-        else:
-            risk["Open Incidents"]=risk["Open Incidents"].astype(int)
-            risk["Risk Score"]=(risk["Work Orders"].clip(upper=5)+risk["Incidents"]*3+risk["Open Incidents"]*2)
-            risk["Risk Level"]=pd.cut(risk["Risk Score"],bins=[-1,4,7,float("inf")],labels=["🟡 Monitor","🟠 Medium","🔴 High"])
-            risk=risk.sort_values(["Risk Score","Work Orders","Incidents"],ascending=False)
-            r1,r2,r3=st.columns(3)
-            r1.metric("🔥 Overlap Locations", f"{len(risk):,}")
-            r2.metric("🔴 High Risk", f"{int((risk['Risk Level'].astype(str).str.contains('High')).sum()):,}")
-            r3.metric("🚨 Open Incidents in Watchlist", f"{int(risk['Open Incidents'].sum()):,}")
-            st.dataframe(risk[["Location","Work Orders","Incidents","Open Incidents","Risk Score","Risk Level"]],use_container_width=True,hide_index=True)
-            chart=risk.head(15).sort_values("Risk Score")
-            fig=px.bar(chart,x="Risk Score",y="Location",orientation="h",text="Risk Score",color="Risk Level",custom_data=["Location","Work Orders","Incidents","Open Incidents","Risk Score","Risk Level"],title="🔥 Top Operational Risk Locations")
-            fig.update_traces(hovertemplate="<b>Location %{customdata[0]}</b><br>Work Orders: %{customdata[1]:,}<br>Incidents: %{customdata[2]:,}<br>Open Incidents: %{customdata[3]:,}<br>Risk Score: %{customdata[4]:,}<br>Level: %{customdata[5]}<extra></extra>")
-            st.plotly_chart(fig,use_container_width=True)
+with insights_tab:
+    st.subheader("🔎 Cross-Source Operational Insights")
+    st.caption(
+        "This view compares Work Order and Incident activity at the same mapped location during the selected period. "
+        "It helps identify where maintenance and guest-impact records overlap; it does not prove that one caused the other."
+    )
 
-            st.subheader("📍 Guest Impact Maintenance Watchlist")
-            watch=risk.head(20)[["Location","Work Orders","Incidents","Open Incidents","Risk Level"]].copy()
-            st.caption("Locations in this watchlist had both maintenance activity and incident activity during the same selected period.")
-            st.dataframe(watch,use_container_width=True,hide_index=True)
+    if filtered_work_orders.empty or filtered_incidents.empty:
+        st.info("Upload both Work Order Report and Incident List Report to enable cross-source insights.")
+    else:
+        wo_loc = filtered_work_orders.dropna(subset=["Location"]).copy()
+        wo_loc["Location"] = wo_loc["Location"].astype(str).str.strip()
+        inc_loc = filtered_incidents.dropna(subset=["Location"]).copy()
+        inc_loc["Location"] = inc_loc["Location"].astype(str).str.strip()
+
+        wo_counts = wo_loc.groupby("Location").size().reset_index(name="Work Orders")
+        inc_counts = inc_loc.groupby("Location").size().reset_index(name="Incidents")
+        open_counts = (
+            inc_loc[inc_loc["Status"].astype(str).str.lower().eq("open")]
+            .groupby("Location").size().reset_index(name="Open Incidents")
+        )
+
+        overlap = (
+            wo_counts.merge(inc_counts, on="Location", how="inner")
+            .merge(open_counts, on="Location", how="left")
+            .fillna({"Open Incidents": 0})
+        )
+
+        if overlap.empty:
+            st.info("No mapped locations appear in both Work Order and Incident reports for the selected scope.")
+        else:
+            overlap["Open Incidents"] = overlap["Open Incidents"].astype(int)
+            overlap["Combined Activity"] = overlap["Work Orders"] + overlap["Incidents"]
+            overlap = overlap.sort_values(
+                ["Combined Activity", "Incidents", "Work Orders"], ascending=False
+            )
+
+            k1, k2, k3 = st.columns(3)
+            k1.metric("📍 Shared Locations", f"{len(overlap):,}")
+            k2.metric("🔧🚨 Combined Activity", f"{int(overlap['Combined Activity'].sum()):,}")
+            k3.metric("🔴 Shared Locations with Open Incidents", f"{int((overlap['Open Incidents'] > 0).sum()):,}")
+
+            with st.expander("ℹ️ How to read this analysis", expanded=True):
+                st.markdown(
+                    "- **Shared Location** means the same mapped location appears in both source reports.\n"
+                    "- **Work Orders** show recorded maintenance activity.\n"
+                    "- **Incidents** show recorded incident cases.\n"
+                    "- **Combined Activity** is only a simple volume indicator to help prioritize where to review first.\n"
+                    "- Use the location detail below to inspect the actual maintenance issues and incident categories before drawing conclusions."
+                )
+
+            st.subheader("📋 Location Overlap Summary")
+            st.dataframe(
+                overlap[["Location", "Work Orders", "Incidents", "Open Incidents", "Combined Activity"]],
+                use_container_width=True, hide_index=True
+            )
+
+            chart = overlap.head(15).sort_values("Combined Activity")
+            fig = px.bar(
+                chart, x="Combined Activity", y="Location", orientation="h", text="Combined Activity",
+                custom_data=["Location", "Work Orders", "Incidents", "Open Incidents", "Combined Activity"],
+                title="📍 Locations with the Highest Cross-Source Activity"
+            )
+            fig.update_traces(
+                hovertemplate=(
+                    "<b>Location %{customdata[0]}</b><br>"
+                    "Work Orders: %{customdata[1]:,}<br>"
+                    "Incidents: %{customdata[2]:,}<br>"
+                    "Open Incidents: %{customdata[3]:,}<br>"
+                    "Combined Activity: %{customdata[4]:,}<extra></extra>"
+                )
+            )
+            fig.update_layout(showlegend=False, yaxis_title="", xaxis_title="Records")
+            fig.update_yaxes(type="category")
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.divider()
+            st.subheader("🔍 Location Detail Explorer")
+            selected_insight_location = st.selectbox(
+                "Select a shared location to inspect",
+                overlap["Location"].astype(str).tolist(),
+                key="cross_source_location"
+            )
+
+            selected_wo = wo_loc[wo_loc["Location"] == selected_insight_location].copy()
+            selected_inc = inc_loc[inc_loc["Location"] == selected_insight_location].copy()
+
+            d1, d2 = st.columns(2)
+            with d1:
+                st.markdown("#### 🔧 Maintenance activity")
+                st.metric("Work Orders", f"{len(selected_wo):,}")
+                if not selected_wo.empty:
+                    wo_issues = (
+                        selected_wo["Work Order Title"].fillna("Not specified").astype(str)
+                        .value_counts().head(10).reset_index()
+                    )
+                    wo_issues.columns = ["Work Order Issue", "Cases"]
+                    st.dataframe(wo_issues, use_container_width=True, hide_index=True)
+
+            with d2:
+                st.markdown("#### 🚨 Incident activity")
+                st.metric("Incidents", f"{len(selected_inc):,}")
+                if not selected_inc.empty:
+                    incident_cats = explode_incident_categories(selected_inc).head(10)
+                    st.markdown("**Top incident categories**")
+                    st.dataframe(incident_cats, use_container_width=True, hide_index=True)
+                    incident_status = (
+                        selected_inc["Status"].fillna("Unknown").astype(str).value_counts()
+                        .reset_index()
+                    )
+                    incident_status.columns = ["Status", "Cases"]
+                    st.markdown("**Incident status**")
+                    st.dataframe(incident_status, use_container_width=True, hide_index=True)
+
+            open_here = int(selected_inc["Status"].astype(str).str.lower().eq("open").sum())
+            if open_here > 0:
+                st.warning(
+                    f"Review priority: Location {selected_insight_location} has {open_here} open incident(s). "
+                    "Use the issue details above to coordinate the next operational review."
+                )
+            else:
+                st.info(
+                    f"Location {selected_insight_location} has overlap between maintenance and incident records, "
+                    "but no open incident is currently recorded in the selected scope."
+                )
 
 # =========================================================
 # TEAM PERFORMANCE
@@ -1582,6 +1677,64 @@ with explorer_tab:
         mime="text/csv"
     )
 
+
+
+# =========================================================
+# INCIDENT EXPLORER
+# =========================================================
+
+with incident_explorer_tab:
+    st.subheader("🚨 Incident Explorer")
+    st.caption("Inspect the underlying Incident List Report records using the current global Property / Area / Date scope.")
+
+    if filtered_incidents.empty:
+        st.info("Upload an Incident List Report to use the Incident Explorer.")
+    else:
+        ie1, ie2, ie3, ie4 = st.columns(4)
+        with ie1:
+            incident_locations = sorted(filtered_incidents["Location"].dropna().astype(str).unique().tolist())
+            selected_incident_locations = st.multiselect("📍 Location", incident_locations, default=incident_locations, key="incident_explorer_location")
+        with ie2:
+            incident_status_options = sorted(filtered_incidents["Status"].dropna().astype(str).unique().tolist())
+            selected_incident_status = st.multiselect("📌 Status", incident_status_options, default=incident_status_options, key="incident_explorer_status")
+        with ie3:
+            incident_dept_options = sorted(filtered_incidents["Department"].dropna().astype(str).unique().tolist())
+            selected_incident_departments = st.multiselect("👥 Department", incident_dept_options, default=incident_dept_options, key="incident_explorer_department")
+        with ie4:
+            incident_search = st.text_input("🔎 Search", placeholder="Incident, guest, location, log no...", key="incident_explorer_search")
+
+        incident_display = filtered_incidents.copy()
+        if selected_incident_locations:
+            incident_display = incident_display[incident_display["Location"].astype(str).isin(selected_incident_locations)]
+        if selected_incident_status:
+            incident_display = incident_display[incident_display["Status"].astype(str).isin(selected_incident_status)]
+        if selected_incident_departments:
+            incident_display = incident_display[incident_display["Department"].astype(str).isin(selected_incident_departments)]
+        if incident_search:
+            search_cols = ["Log No", "Location", "Incident Name", "Status", "Created By", "Department", "Guest Name", "More Information", "Guest Feedback"]
+            mask = pd.Series(False, index=incident_display.index)
+            for col in search_cols:
+                mask |= incident_display[col].fillna("").astype(str).str.contains(incident_search, case=False, na=False)
+            incident_display = incident_display[mask]
+
+        incident_columns = [
+            "Property", "Area Type", "Specific Area", "Log No", "Location",
+            "Incident Name", "Status", "Creation Time", "Department",
+            "Guest Temp", "VIP Level", "Guest Name", "Deadline",
+            "Compensation", "Other Compensation", "Cost", "More Information", "Guest Feedback"
+        ]
+        incident_table = incident_display[[c for c in incident_columns if c in incident_display.columns]].copy()
+        st.caption(f"Showing {len(incident_table):,} incident record(s)")
+        st.dataframe(
+            incident_table.sort_values("Creation Time", ascending=False) if "Creation Time" in incident_table.columns else incident_table,
+            use_container_width=True, hide_index=True, height=600
+        )
+        incident_csv = incident_table.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Download Filtered Incidents (CSV)",
+            data=incident_csv, file_name="stayplease_filtered_incidents.csv",
+            mime="text/csv", key="download_incident_csv"
+        )
 
 st.divider()
 st.caption(
