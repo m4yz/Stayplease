@@ -723,15 +723,15 @@ def build_pdf_report(data, filter_context, work_orders=None, incidents=None):
 # HEADER + DATA UPLOAD
 # =========================================================
 
-col_logo, col_title = st.columns([0.6, 10])
+col_logo, col_title = st.columns([0.08, 1], gap="small")
 
 with col_logo:
-    st.image("stayplease_logo.png", width=58)
+    st.image("stayplease_logo.png", width=60)
 
 with col_title:
     st.markdown(
         """
-        <h1 style="margin-bottom: 0;">
+        <h1 style="margin-top: 8px; margin-bottom: 0;">
             StayPlease Operational Intelligence
         </h1>
         """,
