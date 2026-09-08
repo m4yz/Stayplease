@@ -1125,12 +1125,19 @@ def build_room_heatmap_data(dataframe, location_column="Location", category_colu
 
 
 def render_room_issue_heatmap(dataframe, title, key_prefix):
-    """Render a categorical room heatmap with only real floors/rooms shown."""
+    """Render a readable room heatmap with room number and issue count inside each cell."""
     room_work, detail = build_room_heatmap_data(dataframe)
+
     if detail.empty:
-        st.info("No valid guest-room data is available for the heatmap with the current filters.")
+        st.info(
+            "No valid guest-room data is available for the heatmap "
+            "with the current filters."
+        )
         return
 
+    # =========================================================
+    # PROPERTY SELECTOR
+    # =========================================================
     property_choice = st.radio(
         "Property",
         ["PRSJKT", "PPJKT"],
@@ -1138,59 +1145,146 @@ def render_room_issue_heatmap(dataframe, title, key_prefix):
         key=f"{key_prefix}_property"
     )
 
-    # Actual property inventory floors only — intentionally no 74 or 84.
+    # =========================================================
+    # ACTUAL FLOOR INVENTORY
+    # =========================================================
     property_floors = {
         "PRSJKT": [73, 75, 76, 77, 78, 79, 80, 81, 82],
         "PPJKT": [83, 85, 86, 87, 88, 89],
     }
+
     floors = property_floors[property_choice]
-    detail = detail[detail["Floor"].isin(floors)].copy()
+
+    detail = detail[
+        detail["Floor"].isin(floors)
+    ].copy()
 
     if detail.empty:
-        st.info(f"No room issues found for {property_choice} with the current filters.")
+        st.info(
+            f"No room issues found for {property_choice} "
+            "with the current filters."
+        )
         return
 
-    # Keep only room suffixes that actually occur in the selected property's data.
-    room_numbers = sorted(detail["Room"].unique().tolist())
-    room_labels = [f"{r:02d}" for r in room_numbers]
-    floor_labels = [str(f) for f in floors]
+    # =========================================================
+    # ROOM NUMBERS
+    # =========================================================
+    room_numbers = sorted(
+        detail["Room"]
+        .dropna()
+        .astype(int)
+        .unique()
+        .tolist()
+    )
 
+    if not room_numbers:
+        st.info("No valid room numbers are available.")
+        return
+
+    room_labels = [f"{room:02d}" for room in room_numbers]
+    floor_labels = [str(floor) for floor in floors]
+
+    # =========================================================
+    # ISSUE GRID
+    # =========================================================
     grid = (
-        detail.pivot(index="Floor", columns="Room", values="Issues")
-        .reindex(index=floors, columns=room_numbers, fill_value=0)
+        detail.pivot(
+            index="Floor",
+            columns="Room",
+            values="Issues"
+        )
+        .reindex(
+            index=floors,
+            columns=room_numbers,
+            fill_value=0
+        )
         .fillna(0)
     )
+
+    # =========================================================
+    # CATEGORY GRID
+    # =========================================================
     category_grid = (
-        detail.pivot(index="Floor", columns="Room", values="Top Category")
-        .reindex(index=floors, columns=room_numbers)
+        detail.pivot(
+            index="Floor",
+            columns="Room",
+            values="Top Category"
+        )
+        .reindex(
+            index=floors,
+            columns=room_numbers
+        )
         .fillna("No recorded issues")
     )
 
-    custom = []
-    for floor in floors:
-        row = []
-        for room in room_numbers:
-            row.append([
-                f"{floor}{room:02d}",
-                int(grid.loc[floor, room]),
-                str(category_grid.loc[floor, room]),
-            ])
-        custom.append(row)
+    # =========================================================
+    # DISPLAY TEXT + HOVER DATA
+    # =========================================================
+    display_text = []
+    custom_data = []
 
-    # graph_objects is used here so Floor stays a true categorical axis.
+    for floor in floors:
+        text_row = []
+        custom_row = []
+
+        for room in room_numbers:
+            room_no = f"{floor}{room:02d}"
+            issues = int(grid.loc[floor, room])
+            category = str(category_grid.loc[floor, room])
+
+            # Room number and issue count are displayed directly in the cell.
+            text_row.append(
+                f"<b>{room_no}</b><br>{issues} issue{'s' if issues != 1 else ''}"
+            )
+
+            custom_row.append([
+                room_no,
+                issues,
+                category
+            ])
+
+        display_text.append(text_row)
+        custom_data.append(custom_row)
+
+    # =========================================================
+    # COLOR SCALE
+    # =========================================================
+    max_issues = max(
+        int(grid.values.max()),
+        1
+    )
+
+    colorscale = [
+        [0.00, "#2E8B57"],
+        [0.25, "#7BA36A"],
+        [0.45, "#F6E05E"],
+        [0.70, "#ED8936"],
+        [1.00, "#C53030"],
+    ]
+
+    # =========================================================
+    # HEATMAP
+    # =========================================================
     fig = go.Figure(
         data=go.Heatmap(
             z=grid.values,
             x=room_labels,
             y=floor_labels,
-            customdata=custom,
-            colorscale=[
-                [0.0, "#2E8B57"],
-                [0.35, "#F6E05E"],
-                [0.65, "#ED8936"],
-                [1.0, "#C53030"],
-            ],
-            colorbar=dict(title="Issues"),
+            text=display_text,
+            customdata=custom_data,
+            colorscale=colorscale,
+            zmin=0,
+            zmax=max_issues,
+            colorbar=dict(
+                title="Issues",
+                thickness=18,
+                len=0.85
+            ),
+            texttemplate="%{text}",
+            textfont=dict(
+                size=11,
+                color="white"
+            ),
             hovertemplate=(
                 "<b>Room %{customdata[0]}</b><br>"
                 "Total Issues: %{customdata[1]}<br>"
@@ -1198,13 +1292,32 @@ def render_room_issue_heatmap(dataframe, title, key_prefix):
                 "<extra></extra>"
             ),
             hoverongaps=False,
+            xgap=2,
+            ygap=2,
         )
     )
 
+    # =========================================================
+    # LAYOUT
+    # =========================================================
     fig.update_layout(
-        title=title,
-        height=max(440, 120 + len(floors) * 52),
-        margin=dict(l=70, r=45, t=65, b=65),
+        title=dict(
+            text=title,
+            x=0,
+            xanchor="left"
+        ),
+        height=max(
+            520,
+            150 + len(floors) * 68
+        ),
+        margin=dict(
+            l=70,
+            r=70,
+            t=70,
+            b=70
+        ),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
         xaxis=dict(
             title="Room",
             type="category",
@@ -1213,6 +1326,9 @@ def render_room_issue_heatmap(dataframe, title, key_prefix):
             tickmode="array",
             tickvals=room_labels,
             ticktext=room_labels,
+            side="bottom",
+            showgrid=False,
+            zeroline=False,
         ),
         yaxis=dict(
             title="Floor",
@@ -1223,13 +1339,20 @@ def render_room_issue_heatmap(dataframe, title, key_prefix):
             tickvals=floor_labels,
             ticktext=floor_labels,
             autorange="reversed",
+            showgrid=False,
+            zeroline=False,
         ),
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=f"{key_prefix}_chart"
+    )
+
     st.caption(
-        "🟢 Low activity → 🟡 Moderate → 🟠 High → 🔴 Highest issue concentration. "
-        "Only valid property floors and rooms are shown. Hover over a room for details."
+        "🟢 Low activity  →  🟡 Moderate  →  🟠 High  →  🔴 Highest issue concentration. "
+        "Room number and issue count are displayed directly in each cell."
     )
 
 def render_top_problematic_rooms(dataframe, title="🔥 Top 10 Problematic Rooms"):
