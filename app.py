@@ -16,24 +16,6 @@ from reportlab.platypus import (
 )
 
 st.set_page_config(
-    page_title="StayPlease Operational Intelligence",import streamlit as st
-import pandas as pd
-import plotly.express as px
-import matplotlib.pyplot as plt
-from io import BytesIO
-from datetime import datetime
-
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, Image, KeepTogether
-)
-
-st.set_page_config(
     page_title="StayPlease Operational Intelligence",
     page_icon="🏨",
     layout="wide"
