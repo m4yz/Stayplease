@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 from io import BytesIO
 from datetime import datetime
@@ -1124,6 +1125,7 @@ def build_room_heatmap_data(dataframe, location_column="Location", category_colu
 
 
 def render_room_issue_heatmap(dataframe, title, key_prefix):
+    """Render a categorical room heatmap with only real floors/rooms shown."""
     room_work, detail = build_room_heatmap_data(dataframe)
     if detail.empty:
         st.info("No valid guest-room data is available for the heatmap with the current filters.")
@@ -1136,6 +1138,7 @@ def render_room_issue_heatmap(dataframe, title, key_prefix):
         key=f"{key_prefix}_property"
     )
 
+    # Actual property inventory floors only — intentionally no 74 or 84.
     property_floors = {
         "PRSJKT": [73, 75, 76, 77, 78, 79, 80, 81, 82],
         "PPJKT": [83, 85, 86, 87, 88, 89],
@@ -1147,15 +1150,16 @@ def render_room_issue_heatmap(dataframe, title, key_prefix):
         st.info(f"No room issues found for {property_choice} with the current filters.")
         return
 
-    # Show only actual room suffixes found in the valid property data.
+    # Keep only room suffixes that actually occur in the selected property's data.
     room_numbers = sorted(detail["Room"].unique().tolist())
+    room_labels = [f"{r:02d}" for r in room_numbers]
+    floor_labels = [str(f) for f in floors]
 
     grid = (
         detail.pivot(index="Floor", columns="Room", values="Issues")
         .reindex(index=floors, columns=room_numbers, fill_value=0)
         .fillna(0)
     )
-
     category_grid = (
         detail.pivot(index="Floor", columns="Room", values="Top Category")
         .reindex(index=floors, columns=room_numbers)
@@ -1166,95 +1170,131 @@ def render_room_issue_heatmap(dataframe, title, key_prefix):
     for floor in floors:
         row = []
         for room in room_numbers:
-            room_no = f"{floor}{room:02d}"
-            row.append([room_no, int(grid.loc[floor, room]), category_grid.loc[floor, room]])
+            row.append([
+                f"{floor}{room:02d}",
+                int(grid.loc[floor, room]),
+                str(category_grid.loc[floor, room]),
+            ])
         custom.append(row)
 
-    fig = px.imshow(
-        grid,
-        labels=dict(x="Room", y="Floor", color="Issue Count"),
-        x=[f"{r:02d}" for r in room_numbers],
-        y=[str(f) for f in floors],
-        color_continuous_scale=[
-            [0.0, "#2E8B57"],
-            [0.35, "#F6E05E"],
-            [0.65, "#ED8936"],
-            [1.0, "#C53030"],
-        ],
-        aspect="auto",
-        title=title
-    )
-
-    fig.update_traces(
-        customdata=custom,
-        hovertemplate=(
-            "<b>Room %{customdata[0]}</b><br>"
-            "Total Issues: %{customdata[1]}<br>"
-            "Top Category: %{customdata[2]}"
-            "<extra></extra>"
+    # graph_objects is used here so Floor stays a true categorical axis.
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=grid.values,
+            x=room_labels,
+            y=floor_labels,
+            customdata=custom,
+            colorscale=[
+                [0.0, "#2E8B57"],
+                [0.35, "#F6E05E"],
+                [0.65, "#ED8936"],
+                [1.0, "#C53030"],
+            ],
+            colorbar=dict(title="Issues"),
+            hovertemplate=(
+                "<b>Room %{customdata[0]}</b><br>"
+                "Total Issues: %{customdata[1]}<br>"
+                "Top Category: %{customdata[2]}"
+                "<extra></extra>"
+            ),
+            hoverongaps=False,
         )
     )
 
     fig.update_layout(
-        height=max(420, 80 + len(floors) * 45),
-        margin=dict(l=20, r=20, t=60, b=40),
-        coloraxis_colorbar=dict(title="Issues")
+        title=title,
+        height=max(440, 120 + len(floors) * 52),
+        margin=dict(l=70, r=45, t=65, b=65),
+        xaxis=dict(
+            title="Room",
+            type="category",
+            categoryorder="array",
+            categoryarray=room_labels,
+            tickmode="array",
+            tickvals=room_labels,
+            ticktext=room_labels,
+        ),
+        yaxis=dict(
+            title="Floor",
+            type="category",
+            categoryorder="array",
+            categoryarray=floor_labels,
+            tickmode="array",
+            tickvals=floor_labels,
+            ticktext=floor_labels,
+            autorange="reversed",
+        ),
     )
 
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("🟢 Low activity → 🟡 Moderate → 🟠 High → 🔴 Highest issue concentration. Hover over a room for details.")
-
+    st.caption(
+        "🟢 Low activity → 🟡 Moderate → 🟠 High → 🔴 Highest issue concentration. "
+        "Only valid property floors and rooms are shown. Hover over a room for details."
+    )
 
 def render_top_problematic_rooms(dataframe, title="🔥 Top 10 Problematic Rooms"):
+    """Render the room ranking with categorical room labels and readable bars."""
     _, detail = build_room_heatmap_data(dataframe)
     if detail.empty:
         st.info("No valid guest-room data is available for the selected scope.")
         return
 
     ranking = detail.copy()
-    ranking["Room"] = ranking.apply(
+    ranking["Room Label"] = ranking.apply(
         lambda row: f"{int(row['Floor'])}{int(row['Room']):02d}",
         axis=1
     )
     ranking = (
-        ranking.sort_values(["Issues", "Room"], ascending=[False, True])
+        ranking.sort_values(["Issues", "Room Label"], ascending=[False, True])
         .head(10)
-        .sort_values(["Issues", "Room"], ascending=[True, True])
+        .sort_values(["Issues", "Room Label"], ascending=[True, True])
     )
 
-    fig = px.bar(
-        ranking,
-        x="Issues",
-        y="Room",
-        orientation="h",
-        text="Issues",
-        color="Issues",
-        color_continuous_scale=[
-            [0.0, "#2E8B57"],
-            [0.35, "#F6E05E"],
-            [0.65, "#ED8936"],
-            [1.0, "#C53030"],
-        ],
-        custom_data=["Room", "Issues", "Top Category"],
-        title=title
+    room_labels = ranking["Room Label"].astype(str).tolist()
+    max_issues = max(int(ranking["Issues"].max()), 1)
+
+    fig = go.Figure(
+        data=go.Bar(
+            x=ranking["Issues"],
+            y=room_labels,
+            orientation="h",
+            text=ranking["Issues"].astype(int),
+            textposition="outside",
+            customdata=ranking[["Room Label", "Issues", "Top Category"]].values,
+            marker=dict(
+                color=ranking["Issues"],
+                colorscale=[
+                    [0.0, "#2E8B57"],
+                    [0.35, "#F6E05E"],
+                    [0.65, "#ED8936"],
+                    [1.0, "#C53030"],
+                ],
+                cmin=0,
+                cmax=max_issues,
+                showscale=False,
+            ),
+            hovertemplate=(
+                "<b>Room %{customdata[0]}</b><br>"
+                "Total Issues: %{customdata[1]:,}<br>"
+                "Main Category: %{customdata[2]}"
+                "<extra></extra>"
+            ),
+            cliponaxis=False,
+        )
     )
-    fig.update_traces(
-        hovertemplate=(
-            "<b>Room %{customdata[0]}</b><br>"
-            "Total Issues: %{customdata[1]:,}<br>"
-            "Main Category: %{customdata[2]}"
-            "<extra></extra>"
-        ),
-        textposition="outside",
-        cliponaxis=False
-    )
-    fig.update_yaxes(type="category", title="")
-    fig.update_xaxes(title="Issues", rangemode="tozero", dtick=1)
     fig.update_layout(
+        title=title,
         showlegend=False,
-        coloraxis_showscale=False,
-        margin=dict(l=20, r=45, t=55, b=35),
-        bargap=0.28
+        height=430,
+        margin=dict(l=30, r=65, t=60, b=50),
+        bargap=0.28,
+        xaxis=dict(title="Issues", rangemode="tozero", nticks=7),
+        yaxis=dict(
+            title="",
+            type="category",
+            categoryorder="array",
+            categoryarray=room_labels,
+        ),
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -1664,7 +1704,7 @@ with room_intelligence_tab:
                         cliponaxis=False
                     )
                     fig.update_yaxes(type="category", title="")
-                    fig.update_xaxes(title="Issues", rangemode="tozero", dtick=1)
+                    fig.update_xaxes(title="Issues", rangemode="tozero", nticks=7)
                     fig.update_layout(
                         showlegend=False,
                         margin=dict(l=20, r=45, t=55, b=35),
