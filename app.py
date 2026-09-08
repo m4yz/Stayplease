@@ -18,7 +18,7 @@ from reportlab.platypus import (
 st.set_page_config(
     page_title="StayPlease Operational Intelligence",
     page_icon="stayplease_logo.png",
-    layout="wide"
+    layout="wide",
     initial_sidebar_state="expanded"
 )
 
