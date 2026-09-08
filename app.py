@@ -38,11 +38,27 @@ def clean_team_name(sheet_name):
     return name
 
 
+def read_excel_compatible(uploaded_file, **kwargs):
+    """Read modern .xlsx and legacy Excel 97-2003 .xls files.
+
+    Legacy .xls files require xlrd>=2.0.1 in requirements.txt.
+    """
+    name = str(getattr(uploaded_file, "name", "")).lower()
+    engine = "xlrd" if name.endswith(".xls") else None
+    try:
+        return pd.read_excel(uploaded_file, engine=engine, **kwargs)
+    except Exception:
+        # Fallback lets pandas detect the engine for files whose extension/content differs.
+        if hasattr(uploaded_file, "seek"):
+            uploaded_file.seek(0)
+        return pd.read_excel(uploaded_file, **kwargs)
+
+
 def read_single_excel(uploaded_file):
     frames = []
 
     try:
-        xls = pd.ExcelFile(uploaded_file)
+        xls = pd.ExcelFile(uploaded_file, engine="xlrd" if str(getattr(uploaded_file, "name", "")).lower().endswith(".xls") else None)
     except Exception:
         return pd.DataFrame()
 
@@ -51,7 +67,7 @@ def read_single_excel(uploaded_file):
             continue
 
         try:
-            raw = pd.read_excel(uploaded_file, sheet_name=sheet, header=2)
+            raw = read_excel_compatible(uploaded_file, sheet_name=sheet, header=2)
             raw = raw.dropna(how="all")
 
             if raw.empty:
@@ -197,7 +213,7 @@ def add_property_area_mapping(df):
 
 def read_work_order_excel(uploaded_file):
     try:
-        raw = pd.read_excel(uploaded_file, header=3)
+        raw = read_excel_compatible(uploaded_file, header=3)
     except Exception:
         return pd.DataFrame()
     raw = raw.dropna(how="all")
@@ -233,10 +249,10 @@ def read_incident_excel(uploaded_file):
     Timeline follow-up rows do not contain a Log Number, so they are excluded.
     """
     try:
-        raw = pd.read_excel(uploaded_file, sheet_name="Incident", header=None)
+        raw = read_excel_compatible(uploaded_file, sheet_name="Incident", header=None)
     except Exception:
         try:
-            raw = pd.read_excel(uploaded_file, header=None)
+            raw = read_excel_compatible(uploaded_file, header=None)
         except Exception:
             return pd.DataFrame()
 
@@ -708,14 +724,14 @@ st.caption("Task • Work Order • Incident • Operational Intelligence Dashbo
 with st.sidebar:
     st.header("📤 Data Sources")
     uploaded_files = st.file_uploader(
-        "📋 Task Report (required)", type=["xlsx"], accept_multiple_files=True,
-        help="Upload one or multiple StayPlease Task Report Excel files."
+        "📋 Task Report (required)", type=["xlsx", "xls"], accept_multiple_files=True,
+        help="Upload one or multiple StayPlease Task Report Excel files (.xlsx or legacy .xls)."
     )
     uploaded_work_orders = st.file_uploader(
-        "🔧 Work Order Report (optional)", type=["xlsx"], accept_multiple_files=True
+        "🔧 Work Order Report (optional)", type=["xlsx", "xls"], accept_multiple_files=True
     )
     uploaded_incidents = st.file_uploader(
-        "🚨 Incident List Report (optional)", type=["xlsx"], accept_multiple_files=True
+        "🚨 Incident List Report (optional)", type=["xlsx", "xls"], accept_multiple_files=True
     )
 
 if not uploaded_files:
