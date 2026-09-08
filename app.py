@@ -1218,6 +1218,13 @@ def render_room_issue_heatmap(dataframe, title, key_prefix):
     )
 
     # =========================================================
+    # ACTUAL ROOM INVENTORY / UNAVAILABLE ROOMS
+    # =========================================================
+    # These room numbers do not physically exist.  They must appear as
+    # empty gaps in the heatmap rather than as zero-issue rooms.
+    unavailable_rooms = {"8826", "8827", "8926", "8927"}
+
+    # =========================================================
     # DISPLAY TEXT + HOVER DATA
     # =========================================================
     display_text = []
@@ -1229,6 +1236,16 @@ def render_room_issue_heatmap(dataframe, title, key_prefix):
 
         for room in room_numbers:
             room_no = f"{floor}{room:02d}"
+
+            if room_no in unavailable_rooms:
+                # Use a true heatmap gap so a non-existent room is not
+                # misleadingly shown as a valid room with 0 issues.
+                grid.loc[floor, room] = float("nan")
+                category_grid.loc[floor, room] = "Room does not exist"
+                text_row.append("")
+                custom_row.append([room_no, None, "Room does not exist"])
+                continue
+
             issues = int(grid.loc[floor, room])
             category = str(category_grid.loc[floor, room])
 
@@ -1249,8 +1266,9 @@ def render_room_issue_heatmap(dataframe, title, key_prefix):
     # =========================================================
     # COLOR SCALE
     # =========================================================
+    valid_issue_values = grid.stack(dropna=True)
     max_issues = max(
-        int(grid.values.max()),
+        int(valid_issue_values.max()) if not valid_issue_values.empty else 0,
         1
     )
 
