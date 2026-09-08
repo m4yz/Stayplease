@@ -723,7 +723,7 @@ def build_pdf_report(data, filter_context, work_orders=None, incidents=None):
 # HEADER + DATA UPLOAD
 # =========================================================
 
-st.title("🏨 StayPlease Operational Intelligence")
+st.title("StayPlease Operational Intelligence")
 st.caption("Task • Work Order • Incident • Operational Intelligence Dashboard")
 
 with st.sidebar:
