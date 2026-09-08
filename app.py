@@ -190,6 +190,146 @@ def add_property_area_mapping(df):
     return pd.concat([df, mapped], axis=1)
 
 
+
+# =========================================================
+# WORK ORDER + INCIDENT DATA SOURCES
+# =========================================================
+
+def read_work_order_excel(uploaded_file):
+    try:
+        raw = pd.read_excel(uploaded_file, header=3)
+    except Exception:
+        return pd.DataFrame()
+    raw = raw.dropna(how="all")
+    if raw.empty:
+        return pd.DataFrame()
+    cols = ["Location", "Work Order ID", "Overdue", "Date Created", "Status", "Work Order Title", "Assigned To", "Created By", "Last Update", "Message"]
+    raw = raw.iloc[:, :len(cols)].copy()
+    raw.columns = cols[:len(raw.columns)]
+    for c in cols:
+        if c not in raw.columns:
+            raw[c] = pd.NA
+    raw = raw[cols]
+    raw["Location"] = raw["Location"].astype("string").str.strip()
+    raw["Work Order Title"] = raw["Work Order Title"].astype("string").str.strip()
+    raw["Status"] = raw["Status"].astype("string").str.strip()
+    raw["Date Created"] = pd.to_datetime(raw["Date Created"], errors="coerce")
+    raw["Source File"] = uploaded_file.name
+    raw = raw[raw["Work Order Title"].notna() & raw["Work Order Title"].ne("")].copy()
+    raw = add_property_area_mapping(raw)
+    return raw
+
+
+def load_work_orders(files):
+    frames = [read_work_order_excel(f) for f in files]
+    frames = [x for x in frames if not x.empty]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def read_incident_excel(uploaded_file):
+    """Read StayPlease Incident List Report.
+
+    The report uses a two-row visual header followed by one row per incident.
+    Timeline follow-up rows do not contain a Log Number, so they are excluded.
+    """
+    try:
+        raw = pd.read_excel(uploaded_file, sheet_name="Incident", header=None)
+    except Exception:
+        try:
+            raw = pd.read_excel(uploaded_file, header=None)
+        except Exception:
+            return pd.DataFrame()
+
+    if raw.empty or raw.shape[1] < 10:
+        return pd.DataFrame()
+
+    # Actual incident records are the rows with a numeric Log Number in column 0.
+    log_num = pd.to_numeric(raw.iloc[:, 0], errors="coerce")
+    records = raw.loc[log_num.notna()].copy()
+    if records.empty:
+        return pd.DataFrame()
+
+    # Keep only real incident records and map the report's fixed column layout.
+    def col(idx):
+        return records.iloc[:, idx] if idx < records.shape[1] else pd.Series(pd.NA, index=records.index)
+
+    df = pd.DataFrame({
+        "Log No": col(0),
+        "Location": col(1),
+        "Incident Name": col(2),
+        "Status": col(3),
+        "Created By": col(4),
+        "Creation Time": col(5),
+        "Staff Tag": col(6),
+        "Guest Temp": col(7),
+        "Department": col(8),
+        "Deadline": col(9),
+        "Guest Name": col(10),
+        "VIP Level": col(11),
+        "Arrival": col(12),
+        "Departure": col(13),
+        "More Information": col(14),
+        "Guest Feedback": col(25),
+        "Compensation": col(26),
+        "Other Compensation": col(27),
+        "Cost": col(28),
+        "Issued By": col(29),
+    })
+
+    text_cols = [
+        "Log No", "Location", "Incident Name", "Status", "Created By",
+        "Staff Tag", "Guest Temp", "Department", "VIP Level", "Guest Name",
+        "More Information", "Guest Feedback", "Compensation",
+        "Other Compensation", "Issued By"
+    ]
+    for c in text_cols:
+        df[c] = df[c].astype("string").str.strip()
+
+    for c in ["Creation Time", "Deadline", "Arrival", "Departure"]:
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+    df["Cost"] = pd.to_numeric(df["Cost"], errors="coerce").fillna(0)
+
+    status_norm = df["Status"].astype("string").str.strip().str.lower()
+    df["Status"] = status_norm.replace({"close": "Closed", "closed": "Closed", "open": "Open"}).fillna(df["Status"])
+
+    df["Source File"] = getattr(uploaded_file, "name", "Incident List Report")
+    df = df[df["Incident Name"].notna() & df["Incident Name"].ne("")].copy()
+    df = add_property_area_mapping(df)
+    return df
+
+def load_incidents(files):
+    frames = [read_incident_excel(f) for f in files]
+    frames = [x for x in frames if not x.empty]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def explode_incident_categories(data):
+    if data.empty:
+        return pd.DataFrame(columns=["Category", "Cases"])
+    x = data[["Incident Name"]].dropna().copy()
+    x["Category"] = x["Incident Name"].astype(str).str.split(",")
+    x = x.explode("Category")
+    x["Category"] = x["Category"].astype(str).str.replace(r"^\s*!\s*", "", regex=True).str.strip()
+    x = x[x["Category"].ne("")]
+    return x.groupby("Category").size().reset_index(name="Cases").sort_values("Cases", ascending=False)
+
+
+def filter_auxiliary_data(data, date_col, properties, area_types, specific_areas, date_range):
+    if data.empty:
+        return data
+    out = data[data["Area Type"] != "Unmapped"].copy()
+    if properties:
+        out = out[out["Property"].isin(properties)]
+    if area_types:
+        out = out[out["Area Type"].isin(area_types)]
+    if specific_areas:
+        out = out[out["Specific Area"].astype(str).isin(specific_areas)]
+    if date_range and len(date_range) == 2 and date_col in out.columns:
+        start = pd.Timestamp(date_range[0])
+        end = pd.Timestamp(date_range[1]) + pd.Timedelta(days=1)
+        out = out[out[date_col].isna() | ((out[date_col] >= start) & (out[date_col] < end))]
+    return out
+
 def format_duration(hours):
     if pd.isna(hours):
         return "-"
@@ -317,7 +457,7 @@ def _pdf_chart_line(data, x_col, y_col, title, ylabel):
     return buf
 
 
-def build_pdf_report(data, filter_context):
+def build_pdf_report(data, filter_context, work_orders=None, incidents=None):
     """Build a management-ready PDF report from the currently filtered data."""
     buffer = BytesIO()
     doc = SimpleDocTemplate(
@@ -434,12 +574,7 @@ def build_pdf_report(data, filter_context):
         if img:
             story.append(Image(img, width=7.0*inch, height=3.8*inch))
 
-    req_dept = top_n_counts(data, "Req Department", 10)
-    if not req_dept.empty:
-        story.append(Paragraph("Requesting Department", styles["SectionHeader"]))
-        img = _pdf_chart_bar(req_dept, "Req Department", "Tasks", "Top Requesting Departments", "Tasks")
-        if img:
-            story.append(Image(img, width=7.0*inch, height=3.8*inch))
+
 
     story.append(PageBreak())
 
@@ -492,6 +627,31 @@ def build_pdf_report(data, filter_context):
 
     story.append(PageBreak())
 
+    # CROSS-SOURCE OPERATIONAL INTELLIGENCE
+    story.append(Paragraph("Operational Intelligence", styles["SectionHeader"]))
+    if work_orders is None or work_orders.empty or incidents is None or incidents.empty:
+        story.append(Paragraph("Work Order and Incident reports were not both available for this report scope.", styles["Normal"]))
+    else:
+        story.append(Paragraph(
+            f"Work Orders in scope: {len(work_orders):,} &nbsp;&nbsp; | &nbsp;&nbsp; Incidents in scope: {len(incidents):,}",
+            styles["Normal"]
+        ))
+        wo_counts = work_orders.dropna(subset=["Location"]).assign(Location=lambda x: x["Location"].astype(str)).groupby("Location").size().reset_index(name="Work Orders")
+        inc_counts = incidents.dropna(subset=["Location"]).assign(Location=lambda x: x["Location"].astype(str)).groupby("Location").size().reset_index(name="Incidents")
+        overlap = wo_counts.merge(inc_counts, on="Location", how="inner").sort_values(["Work Orders","Incidents"], ascending=False)
+        if overlap.empty:
+            story.append(Paragraph("No mapped location overlap was identified between Work Orders and Incidents in the selected scope.", styles["Normal"]))
+        else:
+            img = _pdf_chart_bar(overlap, "Location", "Work Orders", "Maintenance Activity at Guest-Impact Locations", "Work Orders", top_n=10)
+            if img:
+                story.append(Image(img, width=7.0*inch, height=3.8*inch))
+            rows = [["Location", "Work Orders", "Incidents"]] + [[str(r["Location"]), str(int(r["Work Orders"])), str(int(r["Incidents"]))] for _,r in overlap.head(10).iterrows()]
+            t=Table(rows, repeatRows=1, colWidths=[2.5*inch,2.0*inch,2.0*inch])
+            t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#1F4E78")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),0.4,colors.HexColor("#C9D5E3")),("ALIGN",(1,1),(-1,-1),"CENTER")]))
+            story.append(t)
+
+    story.append(PageBreak())
+
     # TEAM PERFORMANCE
     story.append(Paragraph("Team Performance", styles["SectionHeader"]))
     team_summary = (
@@ -539,33 +699,37 @@ def build_pdf_report(data, filter_context):
 
 
 # =========================================================
-# HEADER + UPLOAD
+# HEADER + DATA UPLOAD
 # =========================================================
 
 st.title("🏨 StayPlease Operational Intelligence")
-st.caption("Task • Request • Defect • Resolution Performance Dashboard")
+st.caption("Task • Work Order • Incident • Operational Intelligence Dashboard")
 
 with st.sidebar:
-    st.header("📤 Data Upload")
-
+    st.header("📤 Data Sources")
     uploaded_files = st.file_uploader(
-        "Upload Task Report Excel Files",
-        type=["xlsx"],
-        accept_multiple_files=True,
-        help="Multiple Excel reports can be uploaded and consolidated automatically."
+        "📋 Task Report (required)", type=["xlsx"], accept_multiple_files=True,
+        help="Upload one or multiple StayPlease Task Report Excel files."
+    )
+    uploaded_work_orders = st.file_uploader(
+        "🔧 Work Order Report (optional)", type=["xlsx"], accept_multiple_files=True
+    )
+    uploaded_incidents = st.file_uploader(
+        "🚨 Incident List Report (optional)", type=["xlsx"], accept_multiple_files=True
     )
 
 if not uploaded_files:
-    st.info("👈 Upload one or multiple StayPlease Task Report Excel files to start.")
+    st.info("👈 Upload one or multiple StayPlease Task Report Excel files to start. Work Order and Incident reports can then be added for expanded analytics.")
     st.stop()
 
-with st.spinner("Reading and consolidating Excel files..."):
+with st.spinner("Reading StayPlease data sources..."):
     df = load_all_files(uploaded_files)
+    work_orders = load_work_orders(uploaded_work_orders) if uploaded_work_orders else pd.DataFrame()
+    incidents = load_incidents(uploaded_incidents) if uploaded_incidents else pd.DataFrame()
 
 if df.empty:
-    st.error("No valid task data was found. Please check the Excel report format.")
+    st.error("No valid task data was found. Please check the Task Report format.")
     st.stop()
-
 
 # =========================================================
 # GLOBAL FILTERS
@@ -642,6 +806,14 @@ if selected_dates and len(selected_dates) == 2:
         | ((filtered["Report Date"] >= start_date) & (filtered["Report Date"] < end_date))
     ]
 
+# Apply the same Property / Area / Date scope to all additional data sources.
+filtered_work_orders = filter_auxiliary_data(
+    work_orders, "Date Created", selected_properties, selected_area_types, selected_specific_areas, selected_dates
+) if not work_orders.empty else pd.DataFrame()
+filtered_incidents = filter_auxiliary_data(
+    incidents, "Creation Time", selected_properties, selected_area_types, selected_specific_areas, selected_dates
+) if not incidents.empty else pd.DataFrame()
+
 # =========================================================
 # EXPORT PDF ANALYTIC REPORT
 # =========================================================
@@ -661,7 +833,7 @@ with st.sidebar:
     st.caption("Export a management-ready PDF based on the current active filters.")
     if st.button("📄 Generate PDF Report", use_container_width=True):
         with st.spinner("Generating analytic report..."):
-            st.session_state["stayplease_pdf_report"] = build_pdf_report(filtered, filter_context)
+            st.session_state["stayplease_pdf_report"] = build_pdf_report(filtered, filter_context, filtered_work_orders, filtered_incidents)
             st.session_state["stayplease_pdf_name"] = (
                 f"stayplease_analytic_report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
             )
@@ -679,10 +851,12 @@ with st.sidebar:
 # TABS
 # =========================================================
 
-overview_tab, operations_tab, defects_tab, team_tab, explorer_tab = st.tabs([
+overview_tab, operations_tab, defects_tab, incident_tab, intelligence_tab, team_tab, explorer_tab = st.tabs([
     "🏠 Executive Overview",
     "📊 Operational Analytics",
-    "🔧 Defect Analytics",
+    "🔧 Defect & Work Orders",
+    "🚨 Incident Analytics",
+    "🔥 Operational Intelligence",
     "👥 Team Performance",
     "📋 Task Explorer"
 ])
@@ -718,6 +892,15 @@ with overview_tab:
     c4.metric("🎯 Completion Rate", f"{completion_rate:.1f}%")
     c5.metric("⏱️ Avg Resolution", format_duration(completed_data["Resolution Hours"].mean()))
     c6.metric("🚨 Urgent Open", f"{urgent_open:,}")
+
+    if not filtered_work_orders.empty or not filtered_incidents.empty:
+        x1,x2,x3,x4=st.columns(4)
+        x1.metric("🔧 Work Orders", f"{len(filtered_work_orders):,}" if not filtered_work_orders.empty else "-")
+        x2.metric("🚨 Incidents", f"{len(filtered_incidents):,}" if not filtered_incidents.empty else "-")
+        open_i=int(filtered_incidents["Status"].astype(str).str.lower().eq("open").sum()) if not filtered_incidents.empty else 0
+        eng_i=int(filtered_incidents["Department"].fillna("").astype(str).str.contains("engineering",case=False,na=False).sum()) if not filtered_incidents.empty else 0
+        x3.metric("🔴 Open Incidents", f"{open_i:,}" if not filtered_incidents.empty else "-")
+        x4.metric("🔧 Eng. Incident Involvement", f"{eng_i:,}" if not filtered_incidents.empty else "-")
 
     st.divider()
 
@@ -783,48 +966,15 @@ with operations_tab:
 
     st.divider()
 
-    col3, col4 = st.columns(2)
-
-    with col3:
-        req_dept = (
-            filtered.dropna(subset=["Req Department"])
-            .groupby("Req Department")
-            .size()
-            .reset_index(name="Tasks")
-            .sort_values("Tasks", ascending=False)
-        )
-
-        if not req_dept.empty:
-            req_total = int(req_dept["Tasks"].sum())
-            req_dept["Share %"] = (req_dept["Tasks"] / req_total * 100).round(1) if req_total else 0
-            fig = px.bar(
-                req_dept, x="Req Department", y="Tasks",
-                text="Tasks", custom_data=["Req Department", "Tasks", "Share %"],
-                title="Requests by Requesting Department"
-            )
-            fig.update_traces(hovertemplate="<b>%{customdata[0]}</b><br>Tasks: %{customdata[1]:,}<br>Share: %{customdata[2]:.1f}%<extra></extra>")
-            st.plotly_chart(fig, use_container_width=True)
-
-    with col4:
-        hour_data = filtered.dropna(subset=["Request Hour"])
-
-        if not hour_data.empty:
-            hourly = (
-                hour_data.groupby("Request Hour")
-                .size()
-                .reset_index(name="Tasks")
-            )
-
-            hour_total = int(hourly["Tasks"].sum())
-            hourly["Share %"] = (hourly["Tasks"] / hour_total * 100).round(1) if hour_total else 0
-            fig = px.bar(
-                hourly, x="Request Hour", y="Tasks",
-                custom_data=["Request Hour", "Tasks", "Share %"],
-                title="🕒 Peak Request Hour"
-            )
-            fig.update_traces(hovertemplate="<b>Hour %{customdata[0]:02d}:00</b><br>Tasks: %{customdata[1]:,}<br>Share: %{customdata[2]:.1f}%<extra></extra>")
-            fig.update_xaxes(dtick=1)
-            st.plotly_chart(fig, use_container_width=True)
+    hour_data = filtered.dropna(subset=["Request Hour"])
+    if not hour_data.empty:
+        hourly = hour_data.groupby("Request Hour").size().reset_index(name="Tasks")
+        hour_total = int(hourly["Tasks"].sum())
+        hourly["Share %"] = (hourly["Tasks"] / hour_total * 100).round(1) if hour_total else 0
+        fig = px.bar(hourly, x="Request Hour", y="Tasks", custom_data=["Request Hour", "Tasks", "Share %"], title="🕒 Peak Request Hour")
+        fig.update_traces(hovertemplate="<b>Hour %{customdata[0]:02d}:00</b><br>Tasks: %{customdata[1]:,}<br>Share: %{customdata[2]:.1f}%<extra></extra>")
+        fig.update_xaxes(dtick=1)
+        st.plotly_chart(fig, use_container_width=True)
 
 
 # =========================================================
@@ -832,7 +982,44 @@ with operations_tab:
 # =========================================================
 
 with defects_tab:
-    st.subheader("🔧 Defect Analytics")
+    st.subheader("🔧 Defect & Work Order Analytics")
+
+    if filtered_work_orders.empty:
+        st.info("Upload a Work Order Report to unlock dedicated maintenance analytics. The existing Engineering task analytics are shown below.")
+    else:
+        w1, w2, w3, w4 = st.columns(4)
+        wo_total = len(filtered_work_orders)
+        wo_done = int(filtered_work_orders["Status"].astype(str).str.lower().eq("done").sum())
+        wo_paused = int(filtered_work_orders["Status"].astype(str).str.lower().str.contains("pause").sum())
+        w1.metric("🔧 Total Work Orders", f"{wo_total:,}")
+        w2.metric("✅ Done", f"{wo_done:,}")
+        w3.metric("⏸️ Paused", f"{wo_paused:,}")
+        w4.metric("🎯 Completion Rate", f"{(wo_done/wo_total*100 if wo_total else 0):.1f}%")
+
+        wc1, wc2 = st.columns(2)
+        with wc1:
+            top_n_chart(filtered_work_orders.rename(columns={"Work Order Title":"Work Order Issue"}), "Work Order Issue", "🔧 Top 10 Work Order Issues")
+        with wc2:
+            top_n_chart(filtered_work_orders, "Location", "📍 Top 10 Maintenance Hotspots")
+
+        st.subheader("🔁 Recurring Maintenance Locations")
+        recurring = top_n_counts(filtered_work_orders, "Location", 15)
+        if not recurring.empty:
+            fig = px.bar(recurring.sort_values("Tasks"), x="Tasks", y="Location", orientation="h", text="Tasks", custom_data=["Location","Tasks"], title="Locations with Repeated Work Orders")
+            fig.update_traces(hovertemplate="<b>Location %{customdata[0]}</b><br>Work Orders: %{customdata[1]:,}<extra></extra>")
+            fig.update_yaxes(type="category")
+            st.plotly_chart(fig, use_container_width=True)
+
+        trend_wo = filtered_work_orders.dropna(subset=["Date Created"]).copy()
+        if not trend_wo.empty:
+            trend_wo["Date"] = trend_wo["Date Created"].dt.date.astype(str)
+            t = trend_wo.groupby("Date").size().reset_index(name="Work Orders")
+            fig = px.line(t, x="Date", y="Work Orders", markers=True, custom_data=["Date","Work Orders"], title="📈 Work Order Trend")
+            fig.update_traces(hovertemplate="<b>%{customdata[0]}</b><br>Work Orders: %{customdata[1]:,}<extra></extra>")
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+    st.subheader("🔧 Engineering Task Defect Analytics")
 
     # Defects are automatically based on Engineering team
     defect_df = filtered[
@@ -1076,6 +1263,155 @@ with defects_tab:
 
 
 # =========================================================
+# INCIDENT ANALYTICS
+# =========================================================
+
+with incident_tab:
+    st.subheader("🚨 Incident Analytics")
+    if filtered_incidents.empty:
+        st.info("Upload an Incident List Report to unlock incident analytics for the current Property / Area / Date scope.")
+    else:
+        total_inc = len(filtered_incidents)
+        open_inc = int(filtered_incidents["Status"].astype(str).str.lower().eq("open").sum())
+        closed_inc = int(filtered_incidents["Status"].astype(str).str.lower().isin(["close", "closed"]).sum())
+        closure_rate = closed_inc / total_inc * 100 if total_inc else 0
+        eng_inc = int(filtered_incidents["Department"].fillna("").astype(str).str.contains("engineering", case=False, na=False).sum())
+        high_impact_terms = r"angry|annoyed|impatient"
+        high_impact = int(filtered_incidents["Guest Temp"].fillna("").astype(str).str.contains(high_impact_terms, case=False, regex=True, na=False).sum())
+
+        i1,i2,i3,i4,i5=st.columns(5)
+        i1.metric("🚨 Total Incidents", f"{total_inc:,}")
+        i2.metric("🔴 Open Incidents", f"{open_inc:,}")
+        i3.metric("🟢 Closure Rate", f"{closure_rate:.1f}%")
+        i4.metric("🔧 Engineering Involved", f"{eng_inc:,}")
+        i5.metric("😡 High Guest Impact", f"{high_impact:,}")
+
+        # Trend + status
+        c1,c2=st.columns(2)
+        with c1:
+            trend_src = filtered_incidents.dropna(subset=["Creation Time"]).copy()
+            if not trend_src.empty:
+                trend_src["Date"] = trend_src["Creation Time"].dt.date
+                trend = trend_src.groupby("Date").size().reset_index(name="Incidents")
+                fig=px.line(trend,x="Date",y="Incidents",markers=True,title="📈 Incident Trend Over Time")
+                fig.update_traces(hovertemplate="<b>%{x}</b><br>Incidents: %{y:,}<extra></extra>")
+                fig.update_layout(xaxis_title="Date",yaxis_title="Incidents")
+                st.plotly_chart(fig,use_container_width=True)
+            else:
+                st.info("No valid incident creation dates available.")
+        with c2:
+            status = filtered_incidents["Status"].fillna("Unknown").value_counts().reset_index()
+            status.columns=["Status","Cases"]
+            fig=px.pie(status,names="Status",values="Cases",hole=.55,title="Incident Status Distribution")
+            fig.update_traces(hovertemplate="<b>%{label}</b><br>Cases: %{value:,}<br>Share: %{percent:.1%}<extra></extra>")
+            st.plotly_chart(fig,use_container_width=True)
+
+        # Categories + locations
+        c3,c4=st.columns(2)
+        with c3:
+            cats=explode_incident_categories(filtered_incidents).head(10).sort_values("Cases")
+            if not cats.empty:
+                fig=px.bar(cats,x="Cases",y="Category",orientation="h",text="Cases",custom_data=["Category","Cases"],title="🏷️ Top Incident Categories")
+                fig.update_traces(hovertemplate="<b>%{customdata[0]}</b><br>Incidents: %{customdata[1]:,}<extra></extra>")
+                fig.update_layout(yaxis_title="",xaxis_title="Incidents")
+                st.plotly_chart(fig,use_container_width=True)
+        with c4:
+            hotspots=top_n_counts(filtered_incidents,"Location",10).sort_values("Tasks")
+            if not hotspots.empty:
+                hotspots=hotspots.rename(columns={"Tasks":"Cases"})
+                fig=px.bar(hotspots,x="Cases",y="Location",orientation="h",text="Cases",custom_data=["Location","Cases"],title="📍 Top Incident Locations")
+                fig.update_traces(hovertemplate="<b>Location %{customdata[0]}</b><br>Incidents: %{customdata[1]:,}<extra></extra>")
+                fig.update_layout(yaxis_title="",xaxis_title="Incidents")
+                st.plotly_chart(fig,use_container_width=True)
+
+        # Guest impact + departments
+        c5,c6=st.columns(2)
+        with c5:
+            temp=filtered_incidents["Guest Temp"].fillna("Not specified").astype(str).str.strip().replace("","Not specified").value_counts().reset_index()
+            temp.columns=["Guest Temp","Cases"]
+            fig=px.bar(temp,x="Guest Temp",y="Cases",text="Cases",custom_data=["Guest Temp","Cases"],title="😟 Guest Temperature / Impact")
+            fig.update_traces(hovertemplate="<b>%{customdata[0]}</b><br>Cases: %{customdata[1]:,}<extra></extra>")
+            st.plotly_chart(fig,use_container_width=True)
+        with c6:
+            dept=filtered_incidents[["Department"]].dropna().copy()
+            if not dept.empty:
+                dept["Department"]=dept["Department"].astype(str).str.split(",")
+                dept=dept.explode("Department")
+                dept["Department"]=dept["Department"].astype(str).str.strip()
+                dept=dept[dept["Department"].ne("")]
+                d=dept.groupby("Department").size().reset_index(name="Incident Involvement").sort_values("Incident Involvement",ascending=True)
+                fig=px.bar(d,x="Incident Involvement",y="Department",orientation="h",text="Incident Involvement",custom_data=["Department","Incident Involvement"],title="👥 Department Involvement")
+                fig.update_traces(hovertemplate="<b>%{customdata[0]}</b><br>Incident involvement: %{customdata[1]:,}<extra></extra>")
+                fig.update_layout(yaxis_title="")
+                st.plotly_chart(fig,use_container_width=True)
+
+        # Service recovery is optional because many reports may have zero/blank values.
+        st.subheader("💰 Service Recovery Analytics")
+        recovery = filtered_incidents.copy()
+        recovery["Has Compensation"] = (
+            recovery["Compensation"].fillna("").astype(str).str.strip().ne("")
+            | recovery["Other Compensation"].fillna("").astype(str).str.strip().ne("")
+            | recovery["Cost"].fillna(0).gt(0)
+        )
+        compensated = int(recovery["Has Compensation"].sum())
+        total_cost = float(recovery.loc[recovery["Cost"].notna(), "Cost"].sum())
+        avg_cost = float(recovery.loc[recovery["Cost"] > 0, "Cost"].mean()) if (recovery["Cost"] > 0).any() else 0.0
+        r1,r2,r3=st.columns(3)
+        r1.metric("🎁 Incidents with Recovery", f"{compensated:,}")
+        r2.metric("💰 Recorded Recovery Cost", f"{total_cost:,.2f}")
+        r3.metric("📊 Avg Positive Cost", f"{avg_cost:,.2f}")
+
+        compensation = recovery["Compensation"].fillna("").astype(str).str.strip()
+        compensation = compensation[compensation.ne("")]
+        if not compensation.empty:
+            comp = compensation.value_counts().head(10).sort_values().reset_index()
+            comp.columns=["Compensation","Cases"]
+            fig=px.bar(comp,x="Cases",y="Compensation",orientation="h",text="Cases",title="Top Service Recovery Types")
+            st.plotly_chart(fig,use_container_width=True)
+        else:
+            st.caption("No structured compensation type was recorded in the selected scope.")
+
+# =========================================================
+# OPERATIONAL INTELLIGENCE
+# =========================================================
+
+with intelligence_tab:
+    st.subheader("🔥 Operational Intelligence")
+    st.caption("Cross-source analysis identifies locations appearing in both Work Orders and Incident List Report during the selected scope. It indicates operational overlap, not proven causation.")
+    if filtered_work_orders.empty or filtered_incidents.empty:
+        st.info("Upload both Work Order Report and Incident List Report to enable cross-source operational intelligence.")
+    else:
+        wo_loc=filtered_work_orders.dropna(subset=["Location"]).copy()
+        wo_loc["Location"]=wo_loc["Location"].astype(str).str.strip()
+        inc_loc=filtered_incidents.dropna(subset=["Location"]).copy()
+        inc_loc["Location"]=inc_loc["Location"].astype(str).str.strip()
+        wo_counts=wo_loc.groupby("Location").size().reset_index(name="Work Orders")
+        inc_counts=inc_loc.groupby("Location").size().reset_index(name="Incidents")
+        open_counts=inc_loc[inc_loc["Status"].astype(str).str.lower().eq("open")].groupby("Location").size().reset_index(name="Open Incidents")
+        risk=wo_counts.merge(inc_counts,on="Location",how="inner").merge(open_counts,on="Location",how="left").fillna({"Open Incidents":0})
+        if risk.empty:
+            st.info("No mapped locations overlap between Work Orders and Incidents in the selected scope.")
+        else:
+            risk["Open Incidents"]=risk["Open Incidents"].astype(int)
+            risk["Risk Score"]=(risk["Work Orders"].clip(upper=5)+risk["Incidents"]*3+risk["Open Incidents"]*2)
+            risk["Risk Level"]=pd.cut(risk["Risk Score"],bins=[-1,4,7,float("inf")],labels=["🟡 Monitor","🟠 Medium","🔴 High"])
+            risk=risk.sort_values(["Risk Score","Work Orders","Incidents"],ascending=False)
+            r1,r2,r3=st.columns(3)
+            r1.metric("🔥 Overlap Locations", f"{len(risk):,}")
+            r2.metric("🔴 High Risk", f"{int((risk['Risk Level'].astype(str).str.contains('High')).sum()):,}")
+            r3.metric("🚨 Open Incidents in Watchlist", f"{int(risk['Open Incidents'].sum()):,}")
+            st.dataframe(risk[["Location","Work Orders","Incidents","Open Incidents","Risk Score","Risk Level"]],use_container_width=True,hide_index=True)
+            chart=risk.head(15).sort_values("Risk Score")
+            fig=px.bar(chart,x="Risk Score",y="Location",orientation="h",text="Risk Score",color="Risk Level",custom_data=["Location","Work Orders","Incidents","Open Incidents","Risk Score","Risk Level"],title="🔥 Top Operational Risk Locations")
+            fig.update_traces(hovertemplate="<b>Location %{customdata[0]}</b><br>Work Orders: %{customdata[1]:,}<br>Incidents: %{customdata[2]:,}<br>Open Incidents: %{customdata[3]:,}<br>Risk Score: %{customdata[4]:,}<br>Level: %{customdata[5]}<extra></extra>")
+            st.plotly_chart(fig,use_container_width=True)
+
+            st.subheader("📍 Guest Impact Maintenance Watchlist")
+            watch=risk.head(20)[["Location","Work Orders","Incidents","Open Incidents","Risk Level"]].copy()
+            st.caption("Locations in this watchlist had both maintenance activity and incident activity during the same selected period.")
+            st.dataframe(watch,use_container_width=True,hide_index=True)
+
+# =========================================================
 # TEAM PERFORMANCE
 # =========================================================
 
@@ -1237,5 +1573,5 @@ st.caption(
     f"📊 {len(filtered):,} filtered tasks | "
     f"🏨 {', '.join(sorted(filtered['Property'].dropna().unique().tolist())) if not filtered.empty else '-'} | "
     f"🏢 {filtered['Team'].nunique()} team(s) | "
-    f"📁 {filtered['Source File'].nunique()} source file(s)"
+    f"📁 {filtered['Source File'].nunique()} task file(s) | 🔧 {len(filtered_work_orders):,} work orders | 🚨 {len(filtered_incidents):,} incidents"
 )
