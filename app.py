@@ -1337,13 +1337,43 @@ with incident_tab:
                 fig.update_layout(yaxis_title="",xaxis_title="Incidents")
                 st.plotly_chart(fig,use_container_width=True)
         with c4:
-            hotspots=top_n_counts(filtered_incidents,"Location",10).sort_values("Tasks")
+            # Locations are room/location labels, not numeric measurements.
+            # Force categorical ordering so Plotly never interprets room numbers
+            # (for example 7301, 8611, 8809) as a continuous numeric axis.
+            hotspots = top_n_counts(filtered_incidents, "Location", 10).rename(columns={"Tasks": "Cases"})
             if not hotspots.empty:
-                hotspots=hotspots.rename(columns={"Tasks":"Cases"})
-                fig=px.bar(hotspots,x="Cases",y="Location",orientation="h",text="Cases",custom_data=["Location","Cases"],title="📍 Top Incident Locations")
-                fig.update_traces(hovertemplate="<b>Location %{customdata[0]}</b><br>Incidents: %{customdata[1]:,}<extra></extra>")
-                fig.update_layout(yaxis_title="",xaxis_title="Incidents")
-                st.plotly_chart(fig,use_container_width=True)
+                hotspots["Location"] = hotspots["Location"].astype(str).str.strip()
+                hotspots = hotspots.sort_values(["Cases", "Location"], ascending=[True, True]).copy()
+                location_order = hotspots["Location"].tolist()
+
+                fig = px.bar(
+                    hotspots,
+                    x="Cases",
+                    y="Location",
+                    orientation="h",
+                    text="Cases",
+                    custom_data=["Location", "Cases"],
+                    category_orders={"Location": location_order},
+                    title="📍 Top Incident Locations"
+                )
+                fig.update_traces(
+                    hovertemplate="<b>Location %{customdata[0]}</b><br>Incidents: %{customdata[1]:,}<extra></extra>",
+                    textposition="outside",
+                    cliponaxis=False
+                )
+                fig.update_yaxes(
+                    type="category",
+                    categoryorder="array",
+                    categoryarray=location_order,
+                    title=""
+                )
+                fig.update_xaxes(title="Incidents", rangemode="tozero", dtick=1)
+                fig.update_layout(
+                    showlegend=False,
+                    margin=dict(l=20, r=40, t=55, b=35),
+                    bargap=0.28
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
         # Guest impact + departments
         c5,c6=st.columns(2)
