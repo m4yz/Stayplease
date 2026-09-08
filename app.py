@@ -1266,7 +1266,10 @@ def render_room_issue_heatmap(dataframe, title, key_prefix):
     # =========================================================
     # COLOR SCALE
     # =========================================================
-    valid_issue_values = grid.stack(dropna=True)
+    # Pandas 3.x compatibility:
+    # Avoid DataFrame.stack(dropna=True), whose legacy dropna behavior
+    # is no longer supported in newer Pandas versions.
+    valid_issue_values = pd.Series(grid.to_numpy().ravel()).dropna()
     max_issues = max(
         int(valid_issue_values.max()) if not valid_issue_values.empty else 0,
         1
