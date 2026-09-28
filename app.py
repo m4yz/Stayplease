@@ -1188,14 +1188,54 @@ with staymenu_tab:
                     ).groupby("Location", as_index=False).agg(
                         Requests=("Request", "size"), Revenue=("Revenue", "sum")
                     ).sort_values("Requests", ascending=False).head(15)
-                    fig = px.bar(location_summary, x="Requests", y="Location",
-                                 orientation="h", text="Requests")
-                    fig.update_layout(
-                        xaxis_title="Requests", yaxis_title="",
-                        yaxis={"categoryorder": "total ascending"},
-                        margin=dict(l=10, r=20, t=10, b=10)
+                    # Force numeric-looking room/location IDs to remain
+                    # discrete categories; otherwise Plotly may draw thin lines.
+                    location_summary["Location"] = (
+                        location_summary["Location"].astype(str).str.strip()
                     )
-                    fig.update_traces(textposition="outside", cliponaxis=False)
+                    location_summary = location_summary[
+                        location_summary["Location"].ne("")
+                    ].copy()
+                    location_summary = location_summary.sort_values(
+                        ["Requests", "Location"], ascending=[True, True]
+                    )
+                    fig = go.Figure(
+                        go.Bar(
+                            x=location_summary["Requests"].astype(int).tolist(),
+                            y=location_summary["Location"].tolist(),
+                            orientation="h",
+                            text=location_summary["Requests"].astype(int).tolist(),
+                            texttemplate="%{text:,}",
+                            textposition="outside",
+                            cliponaxis=False,
+                            marker=dict(line=dict(width=0)),
+                            customdata=location_summary[["Revenue"]].to_numpy(),
+                            hovertemplate=(
+                                "Location: %{y}<br>"
+                                "Requests: %{x:,}<br>"
+                                "Revenue: Rp %{customdata[0]:,.0f}<extra></extra>"
+                            ),
+                        )
+                    )
+                    fig.update_layout(
+                        xaxis=dict(
+                            title="Requests",
+                            rangemode="tozero",
+                            range=[0, max(1, int(location_summary["Requests"].max() * 1.2))],
+                            showgrid=True,
+                            zeroline=True,
+                        ),
+                        yaxis=dict(
+                            title="",
+                            type="category",
+                            categoryorder="array",
+                            categoryarray=location_summary["Location"].tolist(),
+                            automargin=True,
+                        ),
+                        height=max(350, min(650, 42 * len(location_summary) + 100)),
+                        bargap=0.3,
+                        margin=dict(l=20, r=45, t=15, b=40),
+                    )
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.caption("Location data is not available in this report.")
