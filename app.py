@@ -1007,6 +1007,14 @@ overview_tab, operations_tab, defects_tab, room_intelligence_tab, incident_tab, 
 
 with staymenu_tab:
     st.subheader("🍽️ StayMenu Request & Revenue Analysis")
+    st.caption("Revenue in the StayMenu report is converted from USD to Indonesian Rupiah (IDR) using the adjustable rate below.")
+
+    def format_idr(value):
+        try:
+            return "Rp " + f"{float(value):,.0f}".replace(",", ".")
+        except (TypeError, ValueError):
+            return "Rp 0"
+
     if staymenu.empty:
         st.info("Upload a StayMenu Report from the sidebar to activate this module. It is independent of the Task, Work Order, and Incident reports.")
     else:
@@ -1025,6 +1033,16 @@ with staymenu_tab:
             sm_end = pd.Timestamp(sm_period[1]) + pd.Timedelta(days=1)
             sm = sm[(sm["Date"] >= sm_start) & (sm["Date"] < sm_end)].copy()
 
+        exchange_rate = st.number_input(
+            "USD to IDR Exchange Rate",
+            min_value=1.0,
+            value=16000.0,
+            step=100.0,
+            format="%.0f",
+            help="Adjust this rate to match your finance team's applicable exchange rate."
+        )
+        sm["Revenue IDR"] = pd.to_numeric(sm["Revenue"], errors="coerce").fillna(0) * exchange_rate
+
         sm_type_options = sorted(sm["Request Type"].dropna().unique().tolist())
         selected_sm_types = st.multiselect(
             "Request Type",
@@ -1038,27 +1056,30 @@ with staymenu_tab:
             sm = sm.iloc[0:0].copy()
 
         total_requests = len(sm)
-        total_revenue = float(sm["Revenue"].sum()) if not sm.empty else 0.0
-        charged_requests = int((sm["Revenue"] > 0).sum()) if not sm.empty else 0
+        total_revenue = float(sm["Revenue IDR"].sum()) if not sm.empty else 0.0
+        charged_requests = int((sm["Revenue IDR"] > 0).sum()) if not sm.empty else 0
         avg_charge = total_revenue / charged_requests if charged_requests else 0.0
 
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total Requests", f"{total_requests:,}")
-        k2.metric("Total Revenue", f"${total_revenue:,.2f}")
+        k2.metric("Total Revenue", format_idr(total_revenue))
         k3.metric("Charged Requests", f"{charged_requests:,}")
-        k4.metric("Average Revenue / Charged Request", f"${avg_charge:,.2f}")
+        k4.metric("Average Revenue / Charged Request", format_idr(avg_charge))
 
         if sm.empty:
             st.info("No StayMenu records match the selected filters.")
         else:
-            monthly = sm.assign(Month=sm["Date"].dt.to_period("M").dt.to_timestamp()).groupby("Month", as_index=False).agg(
-                Requests=("Request", "size"), Revenue=("Revenue", "sum")
+            monthly = sm.assign(
+                Month=sm["Date"].dt.to_period("M").dt.to_timestamp()
+            ).groupby("Month", as_index=False).agg(
+                Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
             )
             left, right = st.columns(2)
             with left:
                 st.markdown("#### Monthly Request Trend")
                 fig = px.bar(monthly, x="Month", y="Requests", text="Requests")
-                fig.update_layout(xaxis_title="", yaxis_title="Requests", margin=dict(l=10,r=10,t=20,b=10))
+                fig.update_layout(xaxis_title="", yaxis_title="Requests",
+                                  margin=dict(l=10, r=10, t=20, b=10))
                 fig.update_traces(textposition="outside", cliponaxis=False)
                 st.plotly_chart(fig, use_container_width=True)
             with right:
@@ -1068,42 +1089,163 @@ with staymenu_tab:
                     st.info("No revenue recorded in the selected period.")
                 else:
                     fig = px.bar(revenue_monthly, x="Month", y="Revenue", text="Revenue")
-                    fig.update_layout(xaxis_title="", yaxis_title="Revenue (USD)", margin=dict(l=10,r=10,t=20,b=10))
-                    fig.update_traces(texttemplate="$%{y:,.0f}", textposition="outside", cliponaxis=False)
+                    fig.update_layout(xaxis_title="", yaxis_title="Revenue (IDR)",
+                                      margin=dict(l=10, r=10, t=20, b=10))
+                    fig.update_traces(
+                        texttemplate="Rp %{y:,.0f}",
+                        textposition="outside", cliponaxis=False,
+                        hovertemplate="%{x|%b %Y}<br>Revenue: Rp %{y:,.0f}<extra></extra>"
+                    )
                     st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("#### Request Type Breakdown")
+            type_summary = sm.groupby("Request Type", as_index=False).agg(
+                Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
+            ).sort_values("Requests", ascending=False)
+            fig = px.bar(type_summary, x="Requests", y="Request Type",
+                         orientation="h", text="Requests")
+            fig.update_layout(
+                xaxis_title="Requests", yaxis_title="",
+                yaxis={"categoryorder": "total ascending"},
+                margin=dict(l=10, r=25, t=20, b=10)
+            )
+            fig.update_traces(textposition="outside", cliponaxis=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Keep the main breakdown compact; show the selected category's
+            # underlying items in a separate expandable detail area.
+            st.markdown("#### Request Type Details")
+            detail_type = st.selectbox(
+                "Select a request type to inspect",
+                options=sm_type_options,
+                key="staymenu_detail_type"
+            )
+            type_detail = sm[sm["Request Type"] == detail_type].copy()
+            item_detail = type_detail.groupby("Request", as_index=False).agg(
+                Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
+            ).sort_values(["Requests", "Revenue"], ascending=False)
+            d1, d2, d3 = st.columns(3)
+            d1.metric("Requests", f"{len(type_detail):,}")
+            d2.metric("Revenue", format_idr(type_detail["Revenue IDR"].sum()))
+            d3.metric("Unique Items", f"{type_detail['Request'].nunique():,}")
+            item_detail["Revenue"] = item_detail["Revenue"].map(format_idr)
+            st.dataframe(item_detail, use_container_width=True, hide_index=True)
 
             left, right = st.columns(2)
             with left:
-                st.markdown("#### Request Type Breakdown")
-                type_summary = sm.groupby("Request Type", as_index=False).agg(
-                    Requests=("Request", "size"), Revenue=("Revenue", "sum")
-                ).sort_values("Requests", ascending=False)
-                fig = px.bar(type_summary, x="Requests", y="Request Type", orientation="h", text="Requests")
-                fig.update_layout(xaxis_title="Requests", yaxis_title="", yaxis={"categoryorder":"total ascending"}, margin=dict(l=10,r=10,t=20,b=10))
+                st.markdown("#### Top Requested Items")
+                item_summary = sm.groupby("Request", as_index=False).agg(
+                    Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
+                ).sort_values(["Requests", "Revenue"], ascending=False).head(15)
+                fig = px.bar(item_summary, x="Requests", y="Request",
+                             orientation="h", text="Requests")
+                fig.update_layout(
+                    xaxis_title="Requests", yaxis_title="",
+                    yaxis={"categoryorder": "total ascending"},
+                    height=480, margin=dict(l=10, r=25, t=20, b=10)
+                )
                 fig.update_traces(textposition="outside", cliponaxis=False)
                 st.plotly_chart(fig, use_container_width=True)
             with right:
-                st.markdown("#### Top Requested Items")
-                item_summary = sm.groupby("Request", as_index=False).agg(
-                    Requests=("Request", "size"), Revenue=("Revenue", "sum")
-                ).sort_values(["Requests", "Revenue"], ascending=False).head(15)
-                fig = px.bar(item_summary, x="Requests", y="Request", orientation="h", text="Requests")
-                fig.update_layout(xaxis_title="Requests", yaxis_title="", yaxis={"categoryorder":"total ascending"}, height=480, margin=dict(l=10,r=10,t=20,b=10))
+                st.markdown("#### Revenue by Request Type")
+                revenue_type = type_summary[type_summary["Revenue"] > 0].sort_values(
+                    "Revenue", ascending=False
+                )
+                if revenue_type.empty:
+                    st.info("No revenue recorded in the selected period.")
+                else:
+                    fig = px.bar(revenue_type, x="Revenue", y="Request Type",
+                                 orientation="h", text="Revenue")
+                    fig.update_layout(
+                        xaxis_title="Revenue (IDR)", yaxis_title="",
+                        yaxis={"categoryorder": "total ascending"},
+                        margin=dict(l=10, r=25, t=20, b=10)
+                    )
+                    fig.update_traces(
+                        texttemplate="Rp %{x:,.0f}", textposition="outside",
+                        cliponaxis=False,
+                        hovertemplate="%{y}<br>Revenue: Rp %{x:,.0f}<extra></extra>"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # Laundry-specific view, shown only when matching records exist.
+            laundry = sm[sm["Request Type"].astype(str).str.contains("laundry", case=False, na=False)]
+            if not laundry.empty:
+                st.markdown("#### Laundry Analysis")
+                laundry_summary = laundry.groupby("Request", as_index=False).agg(
+                    Orders=("Request", "size"), Revenue=("Revenue IDR", "sum")
+                ).sort_values(["Revenue", "Orders"], ascending=False)
+                l1, l2, l3 = st.columns(3)
+                l1.metric("Laundry Requests", f"{len(laundry):,}")
+                l2.metric("Laundry Revenue", format_idr(laundry["Revenue IDR"].sum()))
+                l3.metric(
+                    "Average Revenue / Request",
+                    format_idr(laundry["Revenue IDR"].sum() / len(laundry))
+                )
+                laundry_summary["Revenue"] = laundry_summary["Revenue"].map(format_idr)
+                st.dataframe(laundry_summary, use_container_width=True, hide_index=True)
+
+            # Operational patterns: where and when requests are raised.
+            st.markdown("#### Operational Demand")
+            demand_left, demand_right = st.columns(2)
+            with demand_left:
+                st.markdown("**Requests by Location**")
+                if "Location" in sm.columns and sm["Location"].notna().any():
+                    location_summary = sm.assign(
+                        Location=sm["Location"].fillna("Unspecified").astype(str)
+                    ).groupby("Location", as_index=False).agg(
+                        Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
+                    ).sort_values("Requests", ascending=False).head(15)
+                    fig = px.bar(location_summary, x="Requests", y="Location",
+                                 orientation="h", text="Requests")
+                    fig.update_layout(
+                        xaxis_title="Requests", yaxis_title="",
+                        yaxis={"categoryorder": "total ascending"},
+                        margin=dict(l=10, r=20, t=10, b=10)
+                    )
+                    fig.update_traces(textposition="outside", cliponaxis=False)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.caption("Location data is not available in this report.")
+            with demand_right:
+                st.markdown("**Requests by Day of Week**")
+                weekday_order = ["Monday", "Tuesday", "Wednesday", "Thursday",
+                                 "Friday", "Saturday", "Sunday"]
+                weekday = sm.assign(
+                    Weekday=sm["Date"].dt.day_name()
+                ).groupby("Weekday", as_index=False).agg(
+                    Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
+                )
+                weekday["Weekday"] = pd.Categorical(
+                    weekday["Weekday"], categories=weekday_order, ordered=True
+                )
+                weekday = weekday.sort_values("Weekday")
+                fig = px.bar(weekday, x="Weekday", y="Requests", text="Requests")
+                fig.update_layout(
+                    xaxis_title="", yaxis_title="Requests",
+                    margin=dict(l=10, r=10, t=10, b=10)
+                )
                 fig.update_traces(textposition="outside", cliponaxis=False)
                 st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("#### Revenue-Generating Requests")
-            charged = sm[sm["Revenue"] > 0].groupby("Request", as_index=False).agg(
-                Requests=("Request", "size"), Revenue=("Revenue", "sum")
+            charged = sm[sm["Revenue IDR"] > 0].groupby("Request", as_index=False).agg(
+                Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
             ).sort_values("Revenue", ascending=False)
             if charged.empty:
                 st.info("No revenue-generating requests in the selected period.")
             else:
+                charged["Revenue"] = charged["Revenue"].map(format_idr)
                 st.dataframe(charged, use_container_width=True, hide_index=True)
 
             st.markdown("#### Request Details")
-            detail_cols = [c for c in ["Date", "Request Time", "Location", "Request", "Revenue", "Guest Name", "Start Time", "Done Time", "Department", "Remark"] if c in sm.columns]
-            st.dataframe(sm[detail_cols].sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+            detail_cols = [c for c in ["Date", "Request Time", "Location", "Request",
+                                       "Revenue", "Guest Name", "Start Time", "Done Time",
+                                       "Department", "Remark"] if c in sm.columns]
+            display_details = sm[detail_cols].sort_values("Date", ascending=False).copy()
+            if "Revenue" in display_details.columns:
+                display_details["Revenue"] = (display_details["Revenue"].astype(float) * exchange_rate).map(format_idr)
+            st.dataframe(display_details, use_container_width=True, hide_index=True)
 
             st.download_button(
                 "⬇️ Download StayMenu Analysis CSV",
