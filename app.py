@@ -727,60 +727,107 @@ def build_pdf_report(data, filter_context, work_orders=None, incidents=None):
 
 
 def load_staymenu_reports(uploaded_files):
-    """Load StayMenu reports whose header follows the report metadata rows."""
+    """Load StayMenu exports, including headers containing embedded line breaks."""
     frames = []
+
+    def normalize_header(value):
+        return re.sub(r"\s+", " ", str(value)).strip().lower()
+
     for uploaded_file in uploaded_files:
         try:
             uploaded_file.seek(0)
             raw = pd.read_excel(uploaded_file, header=None)
             header_idx = None
-            for idx in range(min(len(raw), 15)):
-                values = raw.iloc[idx].fillna("").astype(str).str.strip().str.lower().tolist()
-                if "date" in values and "request" in values and any("revenue" in v for v in values):
+
+            # StayMenu exports include report metadata before the column row.
+            # Normalize line breaks because Excel labels such as "Request\nTime"
+            # and "Revenue\n($)" are split across lines.
+            for idx in range(min(len(raw), 25)):
+                values = [normalize_header(v) for v in raw.iloc[idx].tolist()]
+                has_date = any(v == "date" for v in values)
+                has_request = any(v == "request" for v in values)
+                has_revenue = any(v.startswith("revenue") for v in values)
+                if has_date and has_request and has_revenue:
                     header_idx = idx
                     break
+
             if header_idx is None:
-                st.warning(f"StayMenu report '{uploaded_file.name}' was skipped: header row not found.")
+                st.warning(
+                    f"StayMenu report '{uploaded_file.name}' was skipped: "
+                    "could not identify the column header row."
+                )
                 continue
 
             uploaded_file.seek(0)
             frame = pd.read_excel(uploaded_file, header=header_idx)
             frame.columns = [
-                re.sub(r"\\s+", " ", str(col)).strip()
+                re.sub(r"\s+", " ", str(col)).strip()
                 for col in frame.columns
             ]
-            frame = frame.rename(columns={
-                "Request Time": "Request Time",
-                "Revenue ($)": "Revenue",
-                "Attend by Dept": "Department"
-            })
+
+            # Normalize known report labels while retaining original detail fields.
+            normalized = {col: normalize_header(col) for col in frame.columns}
+            rename = {}
+            for col, norm in normalized.items():
+                if norm == "date":
+                    rename[col] = "Date"
+                elif norm == "request":
+                    rename[col] = "Request"
+                elif norm.startswith("revenue"):
+                    rename[col] = "Revenue"
+                elif norm in ("request time", "requesttime"):
+                    rename[col] = "Request Time"
+                elif norm == "attend by dept":
+                    rename[col] = "Department"
+                elif norm == "guest name":
+                    rename[col] = "Guest Name"
+                elif norm == "start time":
+                    rename[col] = "Start Time"
+                elif norm == "done time":
+                    rename[col] = "Done Time"
+            frame = frame.rename(columns=rename)
 
             required = {"Date", "Request", "Revenue"}
             if not required.issubset(set(frame.columns)):
-                st.warning(f"StayMenu report '{uploaded_file.name}' is missing required columns.")
+                missing = ", ".join(sorted(required - set(frame.columns)))
+                st.warning(
+                    f"StayMenu report '{uploaded_file.name}' is missing "
+                    f"required columns: {missing}."
+                )
                 continue
 
             frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
             frame["Revenue"] = pd.to_numeric(
-                frame["Revenue"].astype(str).str.replace(",", "", regex=False),
+                frame["Revenue"].astype(str).str.replace(",", "", regex=False)
+                .str.replace("$", "", regex=False).str.strip(),
                 errors="coerce"
             ).fillna(0)
-            frame["Request"] = frame["Request"].astype(str).str.strip()
+            frame["Request"] = frame["Request"].fillna("").astype(str).str.strip()
+
+            # Exclude blank rows and report-level total rows, not genuine requests.
             frame = frame[
                 frame["Date"].notna()
                 & frame["Request"].ne("")
-                & ~frame["Request"].str.lower().isin(["nan", "total revenue"])
+                & ~frame["Request"].str.lower().isin(
+                    ["nan", "total revenue", "total"]
+                )
             ].copy()
 
-            frame["Request Type"] = frame["Request"].str.split("-", n=1).str[0].str.strip()
-            frame["Request Item"] = frame["Request"].str.split("-", n=1).str[-1].str.strip()
+            frame["Request Type"] = (
+                frame["Request"].str.split("-", n=1).str[0].str.strip()
+            )
+            frame["Request Item"] = (
+                frame["Request"].str.split("-", n=1).str[-1].str.strip()
+            )
             frame["Source File"] = uploaded_file.name
             frames.append(frame)
+
         except Exception as exc:
-            st.warning(f"Unable to read StayMenu report '{uploaded_file.name}': {exc}")
+            st.warning(
+                f"Unable to read StayMenu report '{uploaded_file.name}': {exc}"
+            )
 
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
 
 # =========================================================
 # HEADER + DATA UPLOAD
