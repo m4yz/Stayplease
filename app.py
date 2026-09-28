@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import re
 import plotly.express as px
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
@@ -725,6 +726,62 @@ def build_pdf_report(data, filter_context, work_orders=None, incidents=None):
     return buffer.getvalue()
 
 
+def load_staymenu_reports(uploaded_files):
+    """Load StayMenu reports whose header follows the report metadata rows."""
+    frames = []
+    for uploaded_file in uploaded_files:
+        try:
+            uploaded_file.seek(0)
+            raw = pd.read_excel(uploaded_file, header=None)
+            header_idx = None
+            for idx in range(min(len(raw), 15)):
+                values = raw.iloc[idx].fillna("").astype(str).str.strip().str.lower().tolist()
+                if "date" in values and "request" in values and any("revenue" in v for v in values):
+                    header_idx = idx
+                    break
+            if header_idx is None:
+                st.warning(f"StayMenu report '{uploaded_file.name}' was skipped: header row not found.")
+                continue
+
+            uploaded_file.seek(0)
+            frame = pd.read_excel(uploaded_file, header=header_idx)
+            frame.columns = [
+                re.sub(r"\\s+", " ", str(col)).strip()
+                for col in frame.columns
+            ]
+            frame = frame.rename(columns={
+                "Request Time": "Request Time",
+                "Revenue ($)": "Revenue",
+                "Attend by Dept": "Department"
+            })
+
+            required = {"Date", "Request", "Revenue"}
+            if not required.issubset(set(frame.columns)):
+                st.warning(f"StayMenu report '{uploaded_file.name}' is missing required columns.")
+                continue
+
+            frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+            frame["Revenue"] = pd.to_numeric(
+                frame["Revenue"].astype(str).str.replace(",", "", regex=False),
+                errors="coerce"
+            ).fillna(0)
+            frame["Request"] = frame["Request"].astype(str).str.strip()
+            frame = frame[
+                frame["Date"].notna()
+                & frame["Request"].ne("")
+                & ~frame["Request"].str.lower().isin(["nan", "total revenue"])
+            ].copy()
+
+            frame["Request Type"] = frame["Request"].str.split("-", n=1).str[0].str.strip()
+            frame["Request Item"] = frame["Request"].str.split("-", n=1).str[-1].str.strip()
+            frame["Source File"] = uploaded_file.name
+            frames.append(frame)
+        except Exception as exc:
+            st.warning(f"Unable to read StayMenu report '{uploaded_file.name}': {exc}")
+
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 # =========================================================
 # HEADER + DATA UPLOAD
 # =========================================================
@@ -744,6 +801,10 @@ with st.sidebar:
     uploaded_incidents = st.file_uploader(
         "🚨 Incident List Report (optional)", type=["xlsx", "xls"], accept_multiple_files=True
     )
+    uploaded_staymenu = st.file_uploader(
+        "🍽️ StayMenu Report (optional)", type=["xlsx", "xls"], accept_multiple_files=True,
+        help="Upload StayMenu Report Excel files for request and revenue analysis."
+    )
 
 if not uploaded_files:
     st.info("👈 Upload one or multiple StayPlease Task Report Excel files to start. Work Order and Incident reports can then be added for expanded analytics.")
@@ -753,6 +814,7 @@ with st.spinner("Reading StayPlease data sources..."):
     df = load_all_files(uploaded_files)
     work_orders = load_work_orders(uploaded_work_orders) if uploaded_work_orders else pd.DataFrame()
     incidents = load_incidents(uploaded_incidents) if uploaded_incidents else pd.DataFrame()
+    staymenu = load_staymenu_reports(uploaded_staymenu) if uploaded_staymenu else pd.DataFrame()
 
 if df.empty:
     st.error("No valid task data was found. Please check the Task Report format.")
@@ -878,7 +940,7 @@ with st.sidebar:
 # TABS
 # =========================================================
 
-overview_tab, operations_tab, defects_tab, room_intelligence_tab, incident_tab, insights_tab, team_tab, explorer_tab, incident_explorer_tab = st.tabs([
+overview_tab, operations_tab, defects_tab, room_intelligence_tab, incident_tab, insights_tab, team_tab, explorer_tab, incident_explorer_tab, staymenu_tab = st.tabs([
     "🏠 Executive Overview",
     "📊 Operational Analytics",
     "🔧 Defect & Work Orders",
@@ -887,8 +949,122 @@ overview_tab, operations_tab, defects_tab, room_intelligence_tab, incident_tab, 
     "🔎 Cross-Source Insights",
     "👥 Team Performance",
     "📋 Task Explorer",
-    "🚨 Incident Explorer"
+    "🚨 Incident Explorer",
+    "🍽️ StayMenu Analysis"
 ])
+
+
+# =========================================================
+# STAYMENU ANALYSIS
+# =========================================================
+
+with staymenu_tab:
+    st.subheader("🍽️ StayMenu Request & Revenue Analysis")
+    if staymenu.empty:
+        st.info("Upload a StayMenu Report from the sidebar to activate this module. It is independent of the Task, Work Order, and Incident reports.")
+    else:
+        sm = staymenu.copy()
+        sm_min = sm["Date"].min().date()
+        sm_max = sm["Date"].max().date()
+        sm_period = st.date_input(
+            "StayMenu Date Range",
+            value=(sm_min, sm_max),
+            min_value=sm_min,
+            max_value=sm_max,
+            key="staymenu_date_range"
+        )
+        if isinstance(sm_period, (tuple, list)) and len(sm_period) == 2:
+            sm_start = pd.Timestamp(sm_period[0])
+            sm_end = pd.Timestamp(sm_period[1]) + pd.Timedelta(days=1)
+            sm = sm[(sm["Date"] >= sm_start) & (sm["Date"] < sm_end)].copy()
+
+        sm_type_options = sorted(sm["Request Type"].dropna().unique().tolist())
+        selected_sm_types = st.multiselect(
+            "Request Type",
+            sm_type_options,
+            default=sm_type_options,
+            key="staymenu_request_types"
+        )
+        if selected_sm_types:
+            sm = sm[sm["Request Type"].isin(selected_sm_types)].copy()
+        else:
+            sm = sm.iloc[0:0].copy()
+
+        total_requests = len(sm)
+        total_revenue = float(sm["Revenue"].sum()) if not sm.empty else 0.0
+        charged_requests = int((sm["Revenue"] > 0).sum()) if not sm.empty else 0
+        avg_charge = total_revenue / charged_requests if charged_requests else 0.0
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Total Requests", f"{total_requests:,}")
+        k2.metric("Total Revenue", f"${total_revenue:,.2f}")
+        k3.metric("Charged Requests", f"{charged_requests:,}")
+        k4.metric("Average Revenue / Charged Request", f"${avg_charge:,.2f}")
+
+        if sm.empty:
+            st.info("No StayMenu records match the selected filters.")
+        else:
+            monthly = sm.assign(Month=sm["Date"].dt.to_period("M").dt.to_timestamp()).groupby("Month", as_index=False).agg(
+                Requests=("Request", "size"), Revenue=("Revenue", "sum")
+            )
+            left, right = st.columns(2)
+            with left:
+                st.markdown("#### Monthly Request Trend")
+                fig = px.bar(monthly, x="Month", y="Requests", text="Requests")
+                fig.update_layout(xaxis_title="", yaxis_title="Requests", margin=dict(l=10,r=10,t=20,b=10))
+                fig.update_traces(textposition="outside", cliponaxis=False)
+                st.plotly_chart(fig, use_container_width=True)
+            with right:
+                st.markdown("#### Monthly Revenue")
+                revenue_monthly = monthly[monthly["Revenue"] > 0]
+                if revenue_monthly.empty:
+                    st.info("No revenue recorded in the selected period.")
+                else:
+                    fig = px.bar(revenue_monthly, x="Month", y="Revenue", text="Revenue")
+                    fig.update_layout(xaxis_title="", yaxis_title="Revenue (USD)", margin=dict(l=10,r=10,t=20,b=10))
+                    fig.update_traces(texttemplate="$%{y:,.0f}", textposition="outside", cliponaxis=False)
+                    st.plotly_chart(fig, use_container_width=True)
+
+            left, right = st.columns(2)
+            with left:
+                st.markdown("#### Request Type Breakdown")
+                type_summary = sm.groupby("Request Type", as_index=False).agg(
+                    Requests=("Request", "size"), Revenue=("Revenue", "sum")
+                ).sort_values("Requests", ascending=False)
+                fig = px.bar(type_summary, x="Requests", y="Request Type", orientation="h", text="Requests")
+                fig.update_layout(xaxis_title="Requests", yaxis_title="", yaxis={"categoryorder":"total ascending"}, margin=dict(l=10,r=10,t=20,b=10))
+                fig.update_traces(textposition="outside", cliponaxis=False)
+                st.plotly_chart(fig, use_container_width=True)
+            with right:
+                st.markdown("#### Top Requested Items")
+                item_summary = sm.groupby("Request", as_index=False).agg(
+                    Requests=("Request", "size"), Revenue=("Revenue", "sum")
+                ).sort_values(["Requests", "Revenue"], ascending=False).head(15)
+                fig = px.bar(item_summary, x="Requests", y="Request", orientation="h", text="Requests")
+                fig.update_layout(xaxis_title="Requests", yaxis_title="", yaxis={"categoryorder":"total ascending"}, height=480, margin=dict(l=10,r=10,t=20,b=10))
+                fig.update_traces(textposition="outside", cliponaxis=False)
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("#### Revenue-Generating Requests")
+            charged = sm[sm["Revenue"] > 0].groupby("Request", as_index=False).agg(
+                Requests=("Request", "size"), Revenue=("Revenue", "sum")
+            ).sort_values("Revenue", ascending=False)
+            if charged.empty:
+                st.info("No revenue-generating requests in the selected period.")
+            else:
+                st.dataframe(charged, use_container_width=True, hide_index=True)
+
+            st.markdown("#### Request Details")
+            detail_cols = [c for c in ["Date", "Request Time", "Location", "Request", "Revenue", "Guest Name", "Start Time", "Done Time", "Department", "Remark"] if c in sm.columns]
+            st.dataframe(sm[detail_cols].sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+
+            st.download_button(
+                "⬇️ Download StayMenu Analysis CSV",
+                data=sm.to_csv(index=False).encode("utf-8-sig"),
+                file_name="staymenu_analysis.csv",
+                mime="text/csv",
+                use_container_width=False
+            )
 
 
 # =========================================================
