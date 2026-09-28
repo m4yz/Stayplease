@@ -1007,7 +1007,7 @@ overview_tab, operations_tab, defects_tab, room_intelligence_tab, incident_tab, 
 
 with staymenu_tab:
     st.subheader("🍽️ StayMenu Request & Revenue Analysis")
-    st.caption("Revenue in the StayMenu report is converted from USD to Indonesian Rupiah (IDR) using the adjustable rate below.")
+    st.caption("Revenue is taken directly from the StayMenu Excel report and displayed in Indonesian Rupiah (IDR).")
 
     def format_idr(value):
         try:
@@ -1033,15 +1033,7 @@ with staymenu_tab:
             sm_end = pd.Timestamp(sm_period[1]) + pd.Timedelta(days=1)
             sm = sm[(sm["Date"] >= sm_start) & (sm["Date"] < sm_end)].copy()
 
-        exchange_rate = st.number_input(
-            "USD to IDR Exchange Rate",
-            min_value=1.0,
-            value=16000.0,
-            step=100.0,
-            format="%.0f",
-            help="Adjust this rate to match your finance team's applicable exchange rate."
-        )
-        sm["Revenue IDR"] = pd.to_numeric(sm["Revenue"], errors="coerce").fillna(0) * exchange_rate
+        sm["Revenue"] = pd.to_numeric(sm["Revenue"], errors="coerce").fillna(0)
 
         sm_type_options = sorted(sm["Request Type"].dropna().unique().tolist())
         selected_sm_types = st.multiselect(
@@ -1056,8 +1048,8 @@ with staymenu_tab:
             sm = sm.iloc[0:0].copy()
 
         total_requests = len(sm)
-        total_revenue = float(sm["Revenue IDR"].sum()) if not sm.empty else 0.0
-        charged_requests = int((sm["Revenue IDR"] > 0).sum()) if not sm.empty else 0
+        total_revenue = float(sm["Revenue"].sum()) if not sm.empty else 0.0
+        charged_requests = int((sm["Revenue"] > 0).sum()) if not sm.empty else 0
         avg_charge = total_revenue / charged_requests if charged_requests else 0.0
 
         k1, k2, k3, k4 = st.columns(4)
@@ -1072,7 +1064,7 @@ with staymenu_tab:
             monthly = sm.assign(
                 Month=sm["Date"].dt.to_period("M").dt.to_timestamp()
             ).groupby("Month", as_index=False).agg(
-                Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
+                Requests=("Request", "size"), Revenue=("Revenue", "sum")
             )
             left, right = st.columns(2)
             with left:
@@ -1100,7 +1092,7 @@ with staymenu_tab:
 
             st.markdown("#### Request Type Breakdown")
             type_summary = sm.groupby("Request Type", as_index=False).agg(
-                Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
+                Requests=("Request", "size"), Revenue=("Revenue", "sum")
             ).sort_values("Requests", ascending=False)
             fig = px.bar(type_summary, x="Requests", y="Request Type",
                          orientation="h", text="Requests")
@@ -1122,11 +1114,11 @@ with staymenu_tab:
             )
             type_detail = sm[sm["Request Type"] == detail_type].copy()
             item_detail = type_detail.groupby("Request", as_index=False).agg(
-                Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
+                Requests=("Request", "size"), Revenue=("Revenue", "sum")
             ).sort_values(["Requests", "Revenue"], ascending=False)
             d1, d2, d3 = st.columns(3)
             d1.metric("Requests", f"{len(type_detail):,}")
-            d2.metric("Revenue", format_idr(type_detail["Revenue IDR"].sum()))
+            d2.metric("Revenue", format_idr(type_detail["Revenue"].sum()))
             d3.metric("Unique Items", f"{type_detail['Request'].nunique():,}")
             item_detail["Revenue"] = item_detail["Revenue"].map(format_idr)
             st.dataframe(item_detail, use_container_width=True, hide_index=True)
@@ -1135,7 +1127,7 @@ with staymenu_tab:
             with left:
                 st.markdown("#### Top Requested Items")
                 item_summary = sm.groupby("Request", as_index=False).agg(
-                    Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
+                    Requests=("Request", "size"), Revenue=("Revenue", "sum")
                 ).sort_values(["Requests", "Revenue"], ascending=False).head(15)
                 fig = px.bar(item_summary, x="Requests", y="Request",
                              orientation="h", text="Requests")
@@ -1173,14 +1165,14 @@ with staymenu_tab:
             if not laundry.empty:
                 st.markdown("#### Laundry Analysis")
                 laundry_summary = laundry.groupby("Request", as_index=False).agg(
-                    Orders=("Request", "size"), Revenue=("Revenue IDR", "sum")
+                    Orders=("Request", "size"), Revenue=("Revenue", "sum")
                 ).sort_values(["Revenue", "Orders"], ascending=False)
                 l1, l2, l3 = st.columns(3)
                 l1.metric("Laundry Requests", f"{len(laundry):,}")
-                l2.metric("Laundry Revenue", format_idr(laundry["Revenue IDR"].sum()))
+                l2.metric("Laundry Revenue", format_idr(laundry["Revenue"].sum()))
                 l3.metric(
                     "Average Revenue / Request",
-                    format_idr(laundry["Revenue IDR"].sum() / len(laundry))
+                    format_idr(laundry["Revenue"].sum() / len(laundry))
                 )
                 laundry_summary["Revenue"] = laundry_summary["Revenue"].map(format_idr)
                 st.dataframe(laundry_summary, use_container_width=True, hide_index=True)
@@ -1194,7 +1186,7 @@ with staymenu_tab:
                     location_summary = sm.assign(
                         Location=sm["Location"].fillna("Unspecified").astype(str)
                     ).groupby("Location", as_index=False).agg(
-                        Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
+                        Requests=("Request", "size"), Revenue=("Revenue", "sum")
                     ).sort_values("Requests", ascending=False).head(15)
                     fig = px.bar(location_summary, x="Requests", y="Location",
                                  orientation="h", text="Requests")
@@ -1214,7 +1206,7 @@ with staymenu_tab:
                 weekday = sm.assign(
                     Weekday=sm["Date"].dt.day_name()
                 ).groupby("Weekday", as_index=False).agg(
-                    Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
+                    Requests=("Request", "size"), Revenue=("Revenue", "sum")
                 )
                 weekday["Weekday"] = pd.Categorical(
                     weekday["Weekday"], categories=weekday_order, ordered=True
@@ -1229,8 +1221,8 @@ with staymenu_tab:
                 st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("#### Revenue-Generating Requests")
-            charged = sm[sm["Revenue IDR"] > 0].groupby("Request", as_index=False).agg(
-                Requests=("Request", "size"), Revenue=("Revenue IDR", "sum")
+            charged = sm[sm["Revenue"] > 0].groupby("Request", as_index=False).agg(
+                Requests=("Request", "size"), Revenue=("Revenue", "sum")
             ).sort_values("Revenue", ascending=False)
             if charged.empty:
                 st.info("No revenue-generating requests in the selected period.")
@@ -1244,7 +1236,7 @@ with staymenu_tab:
                                        "Department", "Remark"] if c in sm.columns]
             display_details = sm[detail_cols].sort_values("Date", ascending=False).copy()
             if "Revenue" in display_details.columns:
-                display_details["Revenue"] = (display_details["Revenue"].astype(float) * exchange_rate).map(format_idr)
+                display_details["Revenue"] = (display_details["Revenue"].astype(float)).map(format_idr)
             st.dataframe(display_details, use_container_width=True, hide_index=True)
 
             st.download_button(
